@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>To‑Do List (localStorage)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="container" role="main" aria-labelledby="app-title">
+    <header>
+      <h1 id="app-title">To‑Do</h1>
+      <p class="subtitle">Simple, accessible, persists in local storage</p>
+    </header>
+
+    <form id="todo-form" class="todo-form" aria-label="Add todo">
+      <label for="new-todo" class="visually-hidden">New todo</label>
+      <input id="new-todo" class="input" type="text" placeholder="Add a new task…" aria-label="Add new task" autocomplete="off" />
+      <button type="submit" class="btn primary">Add</button>
+    </form>
+
+    <div class="controls">
+      <div class="filters" role="tablist" aria-label="Filter todos">
+        <button type="button" class="filter active" data-filter="all" role="tab" aria-selected="true">All</button>
+        <button type="button" class="filter" data-filter="active" role="tab" aria-selected="false">Active</button>
+        <button type="button" class="filter" data-filter="completed" role="tab" aria-selected="false">Completed</button>
+      </div>
+      <button id="clear-completed" class="btn" type="button">Clear completed</button>
+    </div>
+
+    <ul id="todo-list" class="todo-list" aria-live="polite"></ul>
+
+    <footer id="todo-stats" class="stats" aria-live="polite"></footer>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
