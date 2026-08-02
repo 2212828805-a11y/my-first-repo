@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using Microsoft.Win32;
 
 namespace Looy.WindowsController;
 
@@ -55,6 +54,13 @@ internal sealed class WindowsController
                 "windows.close_app" => RequirePermission(
                     PermissionKeys.Applications,
                     () => CloseApp(RequiredString(arguments, "app"))),
+                "windows.app_action" => RequirePermission(
+                    PermissionKeys.Applications,
+                    () => AppAction(
+                        RequiredString(arguments, "app"),
+                        RequiredString(arguments, "action"),
+                        OptionalString(arguments, "query", string.Empty))),
+                "windows.diagnose_apps" => RequirePermission(PermissionKeys.Applications, DiagnoseApps),
                 "windows.open_url" => RequirePermission(
                     PermissionKeys.Web,
                     () => OpenUrl(RequiredString(arguments, "url"))),
@@ -129,7 +135,12 @@ internal sealed class WindowsController
         var enabledApps = _getApps()
             .Where(app => app.Enabled)
             .OrderBy(app => app.DisplayName, StringComparer.CurrentCultureIgnoreCase)
-            .Select(app => $"{app.Alias}（{app.DisplayName}）")
+            .Select(app =>
+            {
+                var resolved = InstalledAppResolver.TryResolvePath(app);
+                var state = resolved is null ? "未自动找到路径" : "已检测";
+                return $"{app.Alias}（{app.DisplayName}，{state}，动作：{InstalledAppResolver.GetSupportedActions(app)}）";
+            })
             .ToArray();
 
         return enabledApps.Length == 0
@@ -145,7 +156,7 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail($"应用 {alias} 不在白名单中或尚未启用。请先调用 windows.list_apps。");
         }
 
-        var target = ResolveTarget(app.Target);
+        var target = InstalledAppResolver.ResolveForLaunch(app);
         var startInfo = new ProcessStartInfo
         {
             FileName = target,
@@ -164,34 +175,30 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail($"应用 {alias} 不在白名单中或尚未启用。");
         }
 
-        var target = app.Target.Trim();
-        if (target.Contains(':') && !Path.IsPathRooted(target))
+        var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
+        if (InstalledAppResolver.IsProtocol(app.Target.Trim()))
         {
             return ToolExecutionResult.Fail("该应用使用系统协议启动，无法安全确定对应进程。请手动关闭。");
         }
 
-        var processName = Path.GetFileNameWithoutExtension(target);
-        if (string.IsNullOrWhiteSpace(processName))
-        {
-            return ToolExecutionResult.Fail("无法确定应用进程名。");
-        }
-
-        var matched = Process.GetProcessesByName(processName);
         var requested = 0;
-        foreach (var process in matched)
+        foreach (var processName in InstalledAppResolver.GetProcessNames(app, resolvedTarget))
         {
-            using (process)
+            foreach (var process in Process.GetProcessesByName(processName))
             {
-                try
+                using (process)
                 {
-                    if (process.CloseMainWindow())
+                    try
                     {
-                        requested++;
+                        if (process.CloseMainWindow())
+                        {
+                            requested++;
+                        }
                     }
-                }
-                catch
-                {
-                    // Continue checking other user-visible instances.
+                    catch
+                    {
+                        // Continue checking other user-visible instances.
+                    }
                 }
             }
         }
@@ -203,6 +210,170 @@ internal sealed class WindowsController
 
         _log($"已请求关闭应用：{app.DisplayName}");
         return ToolExecutionResult.Ok($"已请求 {app.DisplayName} 正常关闭，共 {requested} 个窗口。");
+    }
+
+    private ToolExecutionResult AppAction(string alias, string action, string query)
+    {
+        var app = ResolveApp(alias);
+        if (app is null)
+        {
+            return ToolExecutionResult.Fail($"应用 {alias} 不在白名单中或尚未启用。");
+        }
+
+        var normalizedAction = action.Trim().ToLowerInvariant();
+        if (!InstalledAppResolver.SupportsAction(app, normalizedAction))
+        {
+            return ToolExecutionResult.Fail(
+                $"{app.DisplayName} 不支持动作 {normalizedAction}。可用动作：{InstalledAppResolver.GetSupportedActions(app)}。");
+        }
+        if (normalizedAction == "search")
+        {
+            if (!_permissionEnabled(PermissionKeys.Keyboard))
+            {
+                return ToolExecutionResult.Fail("应用内搜索需要先在“权限”页面开启键盘权限。");
+            }
+            if (string.IsNullOrWhiteSpace(query) || query.Trim().Length > 200)
+            {
+                return ToolExecutionResult.Fail("搜索关键词不能为空且不能超过 200 个字符。");
+            }
+        }
+        else if (normalizedAction is "play_pause" or "previous" or "next")
+        {
+            if (!_permissionEnabled(PermissionKeys.Media))
+            {
+                return ToolExecutionResult.Fail("媒体动作需要先在“权限”页面开启媒体权限。");
+            }
+        }
+        else if (normalizedAction != "activate")
+        {
+            return ToolExecutionResult.Fail("不支持的应用动作。");
+        }
+
+        var activation = ActivateAppWindow(app);
+        if (!activation.Success)
+        {
+            return activation;
+        }
+
+        if (normalizedAction == "activate")
+        {
+            return activation;
+        }
+
+        Thread.Sleep(250);
+        if (normalizedAction == "search")
+        {
+            var hotkeyResult = PressHotkey("ctrl+f");
+            if (!hotkeyResult.Success)
+            {
+                return hotkeyResult;
+            }
+            Thread.Sleep(180);
+            var typeResult = TypeText(query.Trim());
+            if (!typeResult.Success)
+            {
+                return typeResult;
+            }
+            if (app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase))
+            {
+                Thread.Sleep(180);
+                PressHotkey("enter");
+            }
+            _log($"已在 {app.DisplayName} 中搜索：{query.Trim()}");
+            return ToolExecutionResult.Ok($"已在 {app.DisplayName} 中输入搜索内容：{query.Trim()}。");
+        }
+
+        var mediaResult = MediaControl(normalizedAction, 1);
+        if (mediaResult.Success)
+        {
+            _log($"已对 {app.DisplayName} 执行：{normalizedAction}");
+        }
+        return mediaResult;
+    }
+
+    private ToolExecutionResult ActivateAppWindow(AppEntry app)
+    {
+        var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
+        var processNames = InstalledAppResolver.GetProcessNames(app, resolvedTarget);
+        var handle = FindMainWindow(processNames);
+        if (handle == IntPtr.Zero)
+        {
+            var openResult = OpenApp(app.Alias);
+            if (!openResult.Success)
+            {
+                return openResult;
+            }
+            for (var attempt = 0; attempt < 30 && handle == IntPtr.Zero; attempt++)
+            {
+                Thread.Sleep(200);
+                handle = FindMainWindow(processNames);
+            }
+        }
+
+        if (handle == IntPtr.Zero)
+        {
+            return ToolExecutionResult.Fail($"已启动 {app.DisplayName}，但没有检测到可激活的主窗口。应用可能仍在启动或缩小到托盘。");
+        }
+
+        if (IsIconic(handle))
+        {
+            ShowWindow(handle, 9);
+        }
+        if (!SetForegroundWindow(handle))
+        {
+            return ToolExecutionResult.Fail($"Windows 阻止了 {app.DisplayName} 获取前台焦点，请先手动点击一次该窗口。");
+        }
+        _log($"已激活应用窗口：{app.DisplayName}");
+        return ToolExecutionResult.Ok($"已激活 {app.DisplayName} 窗口。");
+    }
+
+    private static IntPtr FindMainWindow(IReadOnlyList<string> processNames)
+    {
+        foreach (var processName in processNames)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        process.Refresh();
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                        {
+                            return process.MainWindowHandle;
+                        }
+                    }
+                    catch
+                    {
+                        // Continue checking other instances.
+                    }
+                }
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    private ToolExecutionResult DiagnoseApps()
+    {
+        return ToolExecutionResult.Ok(InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+    }
+
+    public ToolExecutionResult ExportDiagnosticReport()
+    {
+        try
+        {
+            Directory.CreateDirectory(_settingsStore.DiagnosticsDirectory);
+            var path = Path.Combine(
+                _settingsStore.DiagnosticsDirectory,
+                $"app-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            File.WriteAllText(path, InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+            _log($"应用诊断报告已导出：{path}");
+            return ToolExecutionResult.Ok($"诊断报告已保存到：{path}");
+        }
+        catch (Exception exception)
+        {
+            return ToolExecutionResult.Fail($"导出诊断报告失败：{exception.Message}");
+        }
     }
 
     private static ToolExecutionResult OpenUrl(string url)
@@ -425,34 +596,6 @@ internal sealed class WindowsController
             app.Enabled && app.Alias.Equals(alias.Trim(), StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string ResolveTarget(string target)
-    {
-        var expanded = Environment.ExpandEnvironmentVariables(target.Trim());
-        if (Path.IsPathRooted(expanded))
-        {
-            if (!File.Exists(expanded))
-            {
-                throw new FileNotFoundException("配置的应用路径不存在。", expanded);
-            }
-            return expanded;
-        }
-
-        if (expanded.Contains(':'))
-        {
-            return expanded;
-        }
-
-        var appPath = Registry.GetValue(
-                          $@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\{expanded}",
-                          null,
-                          null) as string
-                      ?? Registry.GetValue(
-                          $@"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\{expanded}",
-                          null,
-                          null) as string;
-        return string.IsNullOrWhiteSpace(appPath) ? expanded : appPath;
-    }
-
     private static string RequiredString(JsonElement arguments, string property)
     {
         if (arguments.ValueKind != JsonValueKind.Object
@@ -596,4 +739,16 @@ internal sealed class WindowsController
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr windowHandle, int command);
 }
