@@ -30,6 +30,17 @@ internal static class ToolCatalog
                 "请求白名单中的桌面应用正常关闭，不会强制结束进程。",
                 Properties(
                     Required("app", "string", "应用别名。"))));
+            tools.Add(Tool(
+                "windows.app_action",
+                "对指定白名单应用执行动作。支持激活窗口、应用内搜索，以及网易云等媒体应用的播放暂停和切歌。搜索动作还要求用户开启键盘权限，媒体动作还要求开启媒体权限。",
+                Properties(
+                    Required("app", "string", "应用别名，例如 wechat、netease_music。"),
+                    RequiredEnum("action", "应用动作。", "activate", "search", "play_pause", "previous", "next"),
+                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"))));
+            tools.Add(Tool(
+                "windows.diagnose_apps",
+                "只读检查白名单应用的配置路径、自动发现路径、运行进程和可用动作。不会读取聊天内容或 MCP Token。",
+                Properties()));
         }
 
         if (permissionEnabled(PermissionKeys.Web))
