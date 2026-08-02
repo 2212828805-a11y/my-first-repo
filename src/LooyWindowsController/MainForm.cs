@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 
 namespace Looy.WindowsController;
@@ -267,7 +268,7 @@ internal sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         layout.Controls.Add(new Label
         {
-            Text = "小智只能打开这里列出且已勾选的应用。双击一行可编辑。",
+            Text = "小智只能操作这里列出且已勾选的应用。可自动检测第三方应用路径，双击一行可编辑。",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             ForeColor = Color.FromArgb(80, 85, 95)
@@ -322,12 +323,15 @@ internal sealed class MainForm : Form
         var addButton = new Button { Text = "添加应用", Width = 100, Height = 32 };
         var editButton = new Button { Text = "编辑选中项", Width = 110, Height = 32 };
         var deleteButton = new Button { Text = "删除选中项", Width = 110, Height = 32 };
+        var detectButton = new Button { Text = "自动检测路径", Width = 120, Height = 32 };
         addButton.Click += (_, _) => AddApp();
         editButton.Click += (_, _) => EditSelectedApp();
         deleteButton.Click += (_, _) => DeleteSelectedApp();
+        detectButton.Click += (_, _) => AutoDetectAppPaths();
         buttons.Controls.Add(addButton);
         buttons.Controls.Add(editButton);
         buttons.Controls.Add(deleteButton);
+        buttons.Controls.Add(detectButton);
         layout.Controls.Add(buttons, 0, 2);
 
         page.Controls.Add(layout);
@@ -361,8 +365,11 @@ internal sealed class MainForm : Form
             Padding = new Padding(0, 8, 0, 0)
         };
         var clearButton = new Button { Text = "清空记录", Width = 100, Height = 30 };
+        var exportButton = new Button { Text = "导出应用诊断", Width = 120, Height = 30 };
         clearButton.Click += (_, _) => _logBox.Clear();
         buttons.Controls.Add(clearButton);
+        exportButton.Click += (_, _) => ExportAppDiagnostics();
+        buttons.Controls.Add(exportButton);
         layout.Controls.Add(buttons, 0, 1);
         page.Controls.Add(layout);
         return page;
@@ -611,6 +618,50 @@ internal sealed class MainForm : Form
         }
         _apps.Remove(selected);
         AppsChanged();
+    }
+
+    private void AutoDetectAppPaths()
+    {
+        var detected = new List<string>();
+        var missing = new List<string>();
+        foreach (var app in _apps)
+        {
+            var resolved = InstalledAppResolver.TryResolvePath(app);
+            if (string.IsNullOrWhiteSpace(resolved) || InstalledAppResolver.IsProtocol(resolved))
+            {
+                if (!InstalledAppResolver.IsProtocol(app.Target))
+                {
+                    missing.Add(app.DisplayName);
+                }
+                continue;
+            }
+
+            app.Target = resolved;
+            detected.Add(app.DisplayName);
+        }
+        _apps.ResetBindings();
+        AppsChanged();
+
+        var message = $"已检测到 {detected.Count} 个应用路径。";
+        if (missing.Count > 0)
+        {
+            message += $"\n\n仍未找到：{string.Join("、", missing)}。可双击对应行手动选择实际路径。";
+        }
+        MessageBox.Show(message, "应用路径检测完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void ExportAppDiagnostics()
+    {
+        var result = _windowsController.ExportDiagnosticReport();
+        MessageBox.Show(
+            result.Message,
+            result.Success ? "诊断报告已导出" : "导出失败",
+            MessageBoxButtons.OK,
+            result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        if (result.Success)
+        {
+            Process.Start(new ProcessStartInfo(_settingsStore.DiagnosticsDirectory) { UseShellExecute = true });
+        }
     }
 
     private void AppsChanged()
