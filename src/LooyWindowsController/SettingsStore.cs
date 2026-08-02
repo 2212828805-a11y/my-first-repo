@@ -16,12 +16,14 @@ internal sealed class SettingsStore
         "WindowsController");
 
     public string ScreenshotDirectory => Path.Combine(DataDirectory, "Screenshots");
+    public string DiagnosticsDirectory => Path.Combine(DataDirectory, "Diagnostics");
     private string SettingsPath => Path.Combine(DataDirectory, "settings.json");
 
     public ControllerSettings Load(Action<string>? log = null)
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(ScreenshotDirectory);
+        Directory.CreateDirectory(DiagnosticsDirectory);
 
         if (!File.Exists(SettingsPath))
         {
