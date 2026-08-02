@@ -19,7 +19,7 @@
 
 不要把带 Token 的 MCP 地址截图、发视频或分享给别人。
 
-## 第一版支持的能力
+## 支持的能力
 
 | 工具 | 作用 | 默认状态 |
 | --- | --- | --- |
@@ -27,6 +27,8 @@
 | `windows.list_apps` | 列出允许操作的应用 | 开启 |
 | `windows.open_app` | 打开白名单应用 | 开启 |
 | `windows.close_app` | 请求白名单应用正常关闭 | 开启 |
+| `windows.app_action` | 激活应用、应用内搜索、播放暂停和切歌 | 开启（搜索还需键盘权限） |
+| `windows.diagnose_apps` | 检查应用路径和运行窗口，不读取聊天内容或 Token | 开启 |
 | `windows.open_url` | 打开 http/https 网页 | 开启 |
 | `windows.web_search` | 百度或 Bing 搜索 | 开启 |
 | `windows.media_control` | 音量、静音、播放暂停、切歌 | 开启 |
@@ -43,6 +45,8 @@
 
 - “路遥，打开记事本。”
 - “打开 Edge，搜索郑州明天的天气。”
+- 开启微信和键盘权限后：“打开微信，搜索文件传输助手。”
+- 开启网易云音乐、键盘和媒体权限后：“在网易云搜索周杰伦。”、“暂停网易云音乐。”、“网易云下一首。”
 - “把电脑静音。”
 - “暂停音乐。”
 - 开启键盘权限后：“按下 Ctrl 加 L。”
@@ -58,7 +62,7 @@
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.1.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.2.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -96,15 +100,17 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.1.0` 的标签。
+- 推送形如 `v0.2.0` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-win-x64` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.2.0` artifact 即可。
 
 ## 默认应用白名单
 
 默认启用：记事本、计算器、文件资源管理器、Windows 设置、Microsoft Edge。
 
-Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。不同电脑的安装路径不同，如果直接启用后打不开，请在“应用白名单”页面填写实际 `.exe` 路径。
+Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。安装后先在“应用白名单”页面点击“自动检测路径”，再勾选需要的应用。程序会检查正在运行的进程、Windows 注册表和常见安装目录；仍未找到时再双击对应行选择实际 `.exe` 路径。
+
+微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`。网易云音乐支持激活窗口、搜索、播放/暂停、上一首和下一首。搜索通过应用快捷键完成，因此需要开启“键盘输入和快捷键”权限；播放控制需要开启“音量与媒体控制”权限。
 
 应用配置和加密后的 MCP 地址保存在：
 
@@ -118,13 +124,21 @@ Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，�
 %LOCALAPPDATA%\LOOY\WindowsController\Screenshots
 ```
 
+如果第三方应用仍然打不开或不能执行动作，请在“调用记录”页面点击“导出应用诊断”。报告保存在：
+
+```text
+%LOCALAPPDATA%\LOOY\WindowsController\Diagnostics
+```
+
+诊断报告只包含应用配置路径、检测结果、进程号和窗口句柄，不包含 MCP 接入点、Token、聊天内容或窗口标题。把该 `.txt` 文件发给开发者即可继续适配你的实际安装版本。
+
 ## 当前限制
 
 - 电脑休眠、关机、断网或程序退出后无法接收调用。
 - 普通权限程序无法控制管理员权限窗口或 UAC 安全桌面。
 - 部分游戏、反作弊软件和安全软件会阻止模拟输入。
 - 目前是 Windows x64 版本，暂未打包 ARM64。
-- 第一版截图只保存在电脑本地，没有把屏幕图片上传给大模型。
+- 截图只保存在电脑本地，没有把屏幕图片上传给大模型。
 - 正式商业分发前建议购买代码签名证书，降低 Windows SmartScreen 的未知发布者提示。
 
 ## 项目结构
