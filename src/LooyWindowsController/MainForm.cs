@@ -27,6 +27,8 @@ internal sealed class MainForm : Form
     private readonly HashSet<string> _sessionPermissions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Button _inputAccessButton = new() { Text = "授权键盘与鼠标", Width = 148, Height = 38 };
     private readonly Label _inputAccessStateLabel = new() { AutoSize = true };
+    private readonly Label _systemInputAccessLabel = new() { AutoSize = true };
+    private readonly Button _elevateButton = new() { Text = "管理员模式重启", Width = 148, Height = 36 };
     private bool _initializing = true;
     private bool _emergencyStopped;
     private bool _closingAfterStop;
@@ -141,6 +143,7 @@ internal sealed class MainForm : Form
         AppTheme.StyleButton(_disconnectButton);
         AppTheme.StyleButton(_emergencyButton, ButtonKind.Danger);
         AppTheme.StyleButton(_inputAccessButton, ButtonKind.Primary);
+        AppTheme.StyleButton(_elevateButton);
         AppTheme.StyleTextBox(_endpointBox);
     }
 
@@ -262,7 +265,7 @@ internal sealed class MainForm : Form
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         layout.Controls.Add(AppTheme.SectionTitle("决定路遥可以做什么"), 0, 0);
@@ -297,9 +300,21 @@ internal sealed class MainForm : Form
         _inputAccessStateLabel.Location = new Point(0, 28);
         _inputAccessStateLabel.ForeColor = AppTheme.Muted;
         inputCopy.Controls.Add(_inputAccessStateLabel);
+        _systemInputAccessLabel.Location = new Point(0, 54);
+        _systemInputAccessLabel.ForeColor = AppTheme.Muted;
+        inputCopy.Controls.Add(_systemInputAccessLabel);
         inputAccessPanel.Controls.Add(inputCopy, 0, 0);
-        _inputAccessButton.Anchor = AnchorStyles.Right;
-        inputAccessPanel.Controls.Add(_inputAccessButton, 1, 0);
+        var inputButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            BackColor = AppTheme.SurfaceMuted,
+            Padding = new Padding(8, 0, 0, 0)
+        };
+        inputButtons.Controls.Add(_inputAccessButton);
+        inputButtons.Controls.Add(_elevateButton);
+        inputAccessPanel.Controls.Add(inputButtons, 1, 0);
         layout.Controls.Add(inputAccessPanel, 0, 2);
 
         var permissionPanel = new FlowLayoutPanel
@@ -545,6 +560,7 @@ internal sealed class MainForm : Form
             }
         };
         _inputAccessButton.Click += InputAccessButton_Click;
+        _elevateButton.Click += ElevateButton_Click;
         Shown += MainForm_Shown;
         FormClosing += MainForm_FormClosing;
     }
@@ -560,6 +576,11 @@ internal sealed class MainForm : Form
         {
             ConnectToEndpoint();
         }
+
+        if (Environment.GetCommandLineArgs().Any(argument => argument.Equals("--elevated-restart", StringComparison.OrdinalIgnoreCase)))
+        {
+            WriteLog("管理员输入模式已开启。UAC 安全窗口仍需要你本人确认。");
+        }
     }
 
     private void ConnectButton_Click(object? sender, EventArgs eventArgs) => ConnectToEndpoint();
@@ -573,6 +594,58 @@ internal sealed class MainForm : Form
         {
             await _mcpClient.NotifyToolsChangedAsync();
         }
+    }
+
+    private async void ElevateButton_Click(object? sender, EventArgs eventArgs)
+    {
+        if (WindowsInputAccess.IsElevated)
+        {
+            MessageBox.Show(
+                "路遥智控已经在管理员输入模式中运行。UAC 安全确认窗口仍必须由你本人操作。",
+                "已开启管理员输入模式",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            "如果微信、QQ、网易云或其他目标应用是以管理员身份运行，普通程序无法向它输入键盘内容。\n\n"
+            + "点击“是”后，Windows 会显示管理员确认；确认后路遥智控将重启。重启后如果使用的是“仅本次连接”授权，请再授权一次键盘或鼠标。\n\n"
+            + "管理员模式权限更高，请只在你能看到电脑屏幕时开启。是否继续？",
+            "切换管理员输入模式",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (answer != DialogResult.Yes)
+        {
+            return;
+        }
+
+        SaveSettingsSafe();
+        try
+        {
+            WindowsInputAccess.RestartElevated();
+        }
+        catch (OperationCanceledException exception)
+        {
+            MessageBox.Show(exception.Message, "未切换权限", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"无法切换管理员输入模式：\n\n{exception.Message}",
+                "重启失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+
+        _elevateButton.Enabled = false;
+        WriteLog("Windows 已允许管理员模式，正在关闭当前普通模式窗口。");
+        await _mcpClient.StopAsync();
+        await _mcpClient.DisposeAsync();
+        _closingAfterStop = true;
+        Close();
     }
 
     private async Task<bool> RequestInputPermissionAsync(
@@ -686,6 +759,10 @@ internal sealed class MainForm : Form
         };
         _inputAccessStateLabel.ForeColor = keyboard || mouse ? AppTheme.Success : AppTheme.Muted;
         _inputAccessButton.Text = keyboard && mouse ? "调整授权" : "授权键盘与鼠标";
+        _systemInputAccessLabel.Text = WindowsInputAccess.StatusText;
+        _systemInputAccessLabel.ForeColor = WindowsInputAccess.IsElevated ? AppTheme.Success : AppTheme.Warning;
+        _elevateButton.Text = WindowsInputAccess.IsElevated ? "管理员模式已开启" : "管理员模式重启";
+        _elevateButton.Enabled = !WindowsInputAccess.IsElevated;
     }
 
     private void ConnectToEndpoint()

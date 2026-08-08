@@ -65,7 +65,7 @@
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.3.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.3.2.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -103,9 +103,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.3.1` 的标签。
+- 推送形如 `v0.3.2` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.3.1` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.3.2` artifact 即可。
 
 ## 默认应用列表
 
@@ -114,6 +114,8 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。安装后先在“应用管理”中点击“自动检测路径”，再勾选需要的应用。程序会检查正在运行的进程、Windows 注册表和常见安装目录；仍未找到时再双击对应行选择实际 `.exe` 路径。
 
 微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，QQ 兼容新版 QQNT 常见安装目录；两者均支持激活、搜索联系人和发送消息。网易云音乐优先直接启动真实程序，避免自定义协议确认页，并支持搜索、播放/暂停、上一首和下一首。首次需要键盘或鼠标时，电脑会弹出授权窗口，可选择“仅本次连接”或“始终允许”。
+
+0.3.2 已修复 64 位 Windows 下键盘输入组件尺寸错误导致的“被系统阻止”问题。授权管理页会分别显示“路遥授权”和“系统输入层级”：普通输入模式可操作普通应用；如果目标应用本身以管理员身份运行，可点击“管理员模式重启”，并在 Windows 弹窗中由本人确认。管理员模式也不能自动操作 UAC 安全桌面、安全软件的受保护窗口或部分游戏。
 
 应用配置和加密后的 MCP 地址保存在：
 
@@ -138,7 +140,7 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 ## 当前限制
 
 - 电脑休眠、关机、断网或程序退出后无法接收调用。
-- 普通权限程序无法控制管理员权限窗口或 UAC 安全桌面。
+- 普通输入模式无法控制管理员权限窗口；用户可在授权管理页手动确认并切换管理员输入模式，但 UAC 安全桌面仍无法自动操作。
 - 部分游戏、反作弊软件和安全软件会阻止模拟输入。
 - 目前是 Windows x64 版本，暂未打包 ARM64。
 - 截图只保存在电脑本地，没有把屏幕图片上传给大模型。

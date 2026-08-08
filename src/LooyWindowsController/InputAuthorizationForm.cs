@@ -100,7 +100,9 @@ internal sealed class InputAuthorizationForm : Form
             AutoSize = true,
             Padding = new Padding(0, 12, 0, 0),
             ForeColor = AppTheme.Warning,
-            Text = "请只在你能看到电脑屏幕时授权。路遥不会获得管理员权限，也无法操作 UAC 安全窗口。"
+            Text = WindowsInputAccess.IsElevated
+                ? "当前已是管理员输入模式。请只在你能看到屏幕时授权；UAC 安全窗口仍必须由你本人确认。"
+                : "当前是普通输入模式。若目标应用以管理员身份运行，请授权后在主窗口点击“管理员模式重启”。"
         }, 0, 4);
 
         var buttons = new FlowLayoutPanel

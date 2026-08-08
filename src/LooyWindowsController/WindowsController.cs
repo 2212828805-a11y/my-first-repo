@@ -17,6 +17,8 @@ internal sealed class WindowsController
     private const uint MouseEventMiddleUp = 0x0040;
     private const uint MouseEventWheel = 0x0800;
     private const uint InputKeyboard = 1;
+    private const int ExpectedInputSizeX86 = 28;
+    private const int ExpectedInputSizeX64 = 40;
     private const uint GetAncestorRootOwner = 3;
 
     private readonly Func<string, bool> _permissionEnabled;
@@ -25,6 +27,9 @@ internal sealed class WindowsController
     private readonly SettingsStore _settingsStore;
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _actionLock = new(1, 1);
+
+    internal static bool IsNativeInputLayoutValid =>
+        Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
 
     public WindowsController(
         Func<string, bool> permissionEnabled,
@@ -168,6 +173,8 @@ internal sealed class WindowsController
             $"当前用户：{Environment.UserName}",
             $"系统：{Environment.OSVersion}",
             $"64 位系统：{Environment.Is64BitOperatingSystem}",
+            $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
+            $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
             $"当前时间：{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}",
             "控制器状态：在线");
         return ToolExecutionResult.Ok(message);
@@ -824,7 +831,14 @@ internal sealed class WindowsController
             var path = Path.Combine(
                 _settingsStore.DiagnosticsDirectory,
                 $"app-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
-            File.WriteAllText(path, InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+            var report = string.Join(
+                Environment.NewLine,
+                $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
+                $"键盘输入结构：{Marshal.SizeOf<Input>()} 字节（预期 {(IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86)} 字节）",
+                $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
+                string.Empty,
+                InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+            File.WriteAllText(path, report);
             _log($"应用诊断报告已导出：{path}");
             return ToolExecutionResult.Ok($"诊断报告已保存到：{path}");
         }
@@ -864,7 +878,7 @@ internal sealed class WindowsController
         return ToolExecutionResult.Ok($"已把“{query.Trim()}”交给默认浏览器搜索。");
     }
 
-    private static ToolExecutionResult TypeText(string text)
+    private ToolExecutionResult TypeText(string text)
     {
         if (text.Length == 0)
         {
@@ -876,6 +890,7 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("单次输入不能超过 4000 个字符。");
         }
 
+        var pendingInputs = new List<Input>(128);
         for (var index = 0; index < text.Length; index++)
         {
             var character = text[index];
@@ -885,22 +900,32 @@ internal sealed class WindowsController
                 {
                     index++;
                 }
-                var newlineResult = PressHotkey("enter");
-                if (!newlineResult.Success)
-                {
-                    return newlineResult;
-                }
-                continue;
+                pendingInputs.Add(CreateVirtualKeyInput(0x0D, false));
+                pendingInputs.Add(CreateVirtualKeyInput(0x0D, true));
             }
-            var inputs = new[]
+            else
             {
-                CreateUnicodeInput(character, false),
-                CreateUnicodeInput(character, true)
-            };
-            var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
-            if (sent != (uint)inputs.Length)
+                pendingInputs.Add(CreateUnicodeInput(character, false));
+                pendingInputs.Add(CreateUnicodeInput(character, true));
+            }
+
+            if (pendingInputs.Count >= 120)
             {
-                return ToolExecutionResult.Fail("键盘输入被系统或高权限窗口阻止。");
+                var batchResult = SendKeyboardInputs(pendingInputs, "文字输入");
+                if (!batchResult.Success)
+                {
+                    return batchResult;
+                }
+                pendingInputs.Clear();
+            }
+        }
+
+        if (pendingInputs.Count > 0)
+        {
+            var batchResult = SendKeyboardInputs(pendingInputs, "文字输入");
+            if (!batchResult.Success)
+            {
+                return batchResult;
             }
         }
 
@@ -914,7 +939,7 @@ internal sealed class WindowsController
             : ToolExecutionResult.Fail("Windows 未能返回当前鼠标位置。");
     }
 
-    private static ToolExecutionResult PressHotkey(string keys)
+    private ToolExecutionResult PressHotkey(string keys)
     {
         var parts = keys
             .Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -935,16 +960,49 @@ internal sealed class WindowsController
             virtualKeys.Add(virtualKey);
         }
 
+        var inputs = new List<Input>(virtualKeys.Count * 2);
         foreach (var virtualKey in virtualKeys)
         {
-            keybd_event(virtualKey, 0, 0, UIntPtr.Zero);
+            inputs.Add(CreateVirtualKeyInput(virtualKey, false));
         }
         for (var index = virtualKeys.Count - 1; index >= 0; index--)
         {
-            keybd_event(virtualKeys[index], 0, KeyEventKeyUp, UIntPtr.Zero);
+            inputs.Add(CreateVirtualKeyInput(virtualKeys[index], true));
         }
 
-        return ToolExecutionResult.Ok($"已按下快捷键：{string.Join('+', parts)}");
+        var result = SendKeyboardInputs(inputs, $"快捷键 {string.Join('+', parts)}");
+        return result.Success
+            ? ToolExecutionResult.Ok($"已按下快捷键：{string.Join('+', parts)}")
+            : result;
+    }
+
+    private ToolExecutionResult SendKeyboardInputs(IReadOnlyCollection<Input> inputs, string operation)
+    {
+        var inputSize = Marshal.SizeOf<Input>();
+        var expectedInputSize = IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86;
+        if (!IsNativeInputLayoutValid)
+        {
+            _log($"键盘输入组件尺寸异常：实际 {inputSize}，预期 {expectedInputSize}。");
+            return ToolExecutionResult.Fail("键盘输入组件异常，请安装最新版路遥智控后重试。");
+        }
+
+        var inputArray = inputs as Input[] ?? inputs.ToArray();
+        Marshal.SetLastPInvokeError(0);
+        var sent = SendInput((uint)inputArray.Length, inputArray, inputSize);
+        if (sent == (uint)inputArray.Length)
+        {
+            return ToolExecutionResult.Ok($"已完成{operation}。");
+        }
+
+        var errorCode = Marshal.GetLastWin32Error();
+        _log(
+            $"Windows 拒绝键盘输入：{operation}，已发送 {sent}/{inputArray.Length}，"
+            + $"错误码 {errorCode}，输入尺寸 {inputSize}，管理员模式 {WindowsInputAccess.IsElevated}。");
+        return WindowsInputAccess.IsElevated
+            ? ToolExecutionResult.Fail(
+                $"Windows 或目标应用阻止了{operation}（错误码 {errorCode}）。UAC、安全软件和受保护窗口无法自动操作。")
+            : ToolExecutionResult.Fail(
+                $"目标窗口阻止了{operation}（错误码 {errorCode}）。如果目标应用以管理员身份运行，请在路遥智控“授权管理”中点击“管理员模式重启”。");
     }
 
     private static ToolExecutionResult MoveMouse(int x, int y)
@@ -1136,6 +1194,22 @@ internal sealed class WindowsController
         }
     };
 
+    private static Input CreateVirtualKeyInput(byte virtualKey, bool keyUp) => new()
+    {
+        Type = InputKeyboard,
+        Data = new InputUnion
+        {
+            Keyboard = new KeyboardInput
+            {
+                VirtualKey = virtualKey,
+                ScanCode = 0,
+                Flags = keyUp ? KeyEventKeyUp : 0,
+                Time = 0,
+                ExtraInfo = IntPtr.Zero
+            }
+        }
+    };
+
     private static bool TryResolveVirtualKey(string key, out byte virtualKey)
     {
         var namedKeys = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase)
@@ -1195,6 +1269,15 @@ internal sealed class WindowsController
     {
         [FieldOffset(0)]
         public KeyboardInput Keyboard;
+
+        // INPUT is a native union. Including its largest member is required so
+        // Marshal.SizeOf<Input>() is 40 bytes on x64 (28 on x86). A keyboard-only
+        // union is too small and makes SendInput fail with ERROR_INVALID_PARAMETER.
+        [FieldOffset(0)]
+        public MouseInput Mouse;
+
+        [FieldOffset(0)]
+        public HardwareInput Hardware;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1205,6 +1288,25 @@ internal sealed class WindowsController
         public uint Flags;
         public uint Time;
         public IntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+        public int X;
+        public int Y;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public IntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HardwareInput
+    {
+        public uint Message;
+        public ushort ParameterLow;
+        public ushort ParameterHigh;
     }
 
     [StructLayout(LayoutKind.Sequential)]

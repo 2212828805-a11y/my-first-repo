@@ -45,6 +45,18 @@ jobs:
           Copy-Item README_CN.md dist/win-x64/使用说明.md
           Compress-Archive -Path dist/win-x64/* -DestinationPath dist/LooyWindowsController-win-x64.zip
 
+      - name: Verify Windows keyboard input layout
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-input-layout" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Windows INPUT layout self-test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
@@ -64,8 +76,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.3.1
+          name: LooyWindowsController-Windows-v0.3.2
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.3.1.exe
+            dist/installer/LooyWindowsController-Setup-0.3.2.exe
           if-no-files-found: error

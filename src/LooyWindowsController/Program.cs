@@ -5,6 +5,13 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-input-layout", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = WindowsController.IsNativeInputLayoutValid ? 0 : 87;
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, args) => ShowFatalError(args.Exception);
