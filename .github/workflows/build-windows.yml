@@ -5,6 +5,7 @@ on:
   pull_request:
     branches:
       - main
+      - agent/windows-installer-v011
   push:
     branches:
       - main
@@ -63,8 +64,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.2.0
+          name: LooyWindowsController-Windows-v0.3.0
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.2.0.exe
+            dist/installer/LooyWindowsController-Setup-0.3.0.exe
           if-no-files-found: error

@@ -1,5 +1,5 @@
-#define MyAppName "路遥电脑控制器"
-#define MyAppVersion "0.2.0"
+#define MyAppName "路遥智控"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "LOOY"
 #define MyAppExeName "LooyWindowsController.exe"
 
@@ -21,6 +21,7 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
+SetupIconFile=..\src\LooyWindowsController\Assets\looy.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

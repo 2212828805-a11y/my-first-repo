@@ -32,7 +32,7 @@ internal static class Program
                 $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}]\n{exception}\n\n");
 
             MessageBox.Show(
-                $"路遥电脑控制器遇到错误：\n\n{exception.Message}\n\n错误日志已保存到：\n{logDirectory}",
+                $"路遥智控遇到错误：\n\n{exception.Message}\n\n错误日志已保存到：\n{logDirectory}",
                 "运行错误",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);

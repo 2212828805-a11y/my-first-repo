@@ -1,4 +1,4 @@
-# 路遥电脑控制器
+# 路遥智控
 
 一个运行在用户自己 Windows 电脑上的小智 MCP 控制客户端。用户粘贴自己的 MCP 接入点地址、选择允许的权限并点击连接后，小智即可调用已授权的 Windows 工具。
 
@@ -13,9 +13,9 @@
    wss://你的服务器/mcp_endpoint/mcp/?token=你的专属Token
    ```
 
-5. 在“权限”页面只勾选需要的能力。
-6. 在“应用白名单”页面启用允许小智打开的程序。
-7. 点击“连接小智”。日志显示“已向小智注册 N 个工具”即接入完成。
+5. 在“授权管理”中只勾选需要的能力。
+6. 在“应用管理”中启用允许路遥操作的程序。
+7. 点击“连接路遥”。运行记录显示“已向小智注册 N 个工具”即接入完成。
 
 不要把带 Token 的 MCP 地址截图、发视频或分享给别人。
 
@@ -27,7 +27,7 @@
 | `windows.list_apps` | 列出允许操作的应用 | 开启 |
 | `windows.open_app` | 打开白名单应用 | 开启 |
 | `windows.close_app` | 请求白名单应用正常关闭 | 开启 |
-| `windows.app_action` | 激活应用、应用内搜索、播放暂停和切歌 | 开启（搜索还需键盘权限） |
+| `windows.app_action` | 激活应用、应用内搜索、微信发消息、播放暂停和切歌 | 开启（搜索和发消息还需键盘权限） |
 | `windows.diagnose_apps` | 检查应用路径和运行窗口，不读取聊天内容或 Token | 开启 |
 | `windows.open_url` | 打开 http/https 网页 | 开启 |
 | `windows.web_search` | 百度或 Bing 搜索 | 开启 |
@@ -45,7 +45,7 @@
 
 - “路遥，打开记事本。”
 - “打开 Edge，搜索郑州明天的天气。”
-- 开启微信和键盘权限后：“打开微信，搜索文件传输助手。”
+- 开启微信和键盘权限后：“用微信给文件传输助手发送：测试完成。”
 - 开启网易云音乐、键盘和媒体权限后：“在网易云搜索周杰伦。”、“暂停网易云音乐。”、“网易云下一首。”
 - “把电脑静音。”
 - “暂停音乐。”
@@ -62,7 +62,7 @@
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.2.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.3.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -100,17 +100,17 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.2.0` 的标签。
+- 推送形如 `v0.3.0` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.2.0` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.3.0` artifact 即可。
 
-## 默认应用白名单
+## 默认应用列表
 
 默认启用：记事本、计算器、文件资源管理器、Windows 设置、Microsoft Edge。
 
-Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。安装后先在“应用白名单”页面点击“自动检测路径”，再勾选需要的应用。程序会检查正在运行的进程、Windows 注册表和常见安装目录；仍未找到时再双击对应行选择实际 `.exe` 路径。
+Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。安装后先在“应用管理”中点击“自动检测路径”，再勾选需要的应用。程序会检查正在运行的进程、Windows 注册表和常见安装目录；仍未找到时再双击对应行选择实际 `.exe` 路径。
 
-微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`。网易云音乐支持激活窗口、搜索、播放/暂停、上一首和下一首。搜索通过应用快捷键完成，因此需要开启“键盘输入和快捷键”权限；播放控制需要开启“音量与媒体控制”权限。
+微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，支持激活、搜索联系人和发送消息。网易云音乐支持激活窗口、搜索、播放/暂停、上一首和下一首。控制器会在输入前确认目标应用仍在前台；搜索和微信发消息需要开启“键盘输入和快捷键”权限，播放控制需要开启“音量与媒体控制”权限。
 
 应用配置和加密后的 MCP 地址保存在：
 
@@ -124,7 +124,7 @@ Chrome、微信、抖音、网易云音乐和 VS Code 已提供示例别名，�
 %LOCALAPPDATA%\LOOY\WindowsController\Screenshots
 ```
 
-如果第三方应用仍然打不开或不能执行动作，请在“调用记录”页面点击“导出应用诊断”。报告保存在：
+如果第三方应用仍然打不开或不能执行动作，请在“运行记录”中点击“导出诊断”。报告保存在：
 
 ```text
 %LOCALAPPDATA%\LOOY\WindowsController\Diagnostics

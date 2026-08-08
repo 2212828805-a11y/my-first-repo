@@ -16,7 +16,7 @@ internal static class InstalledAppResolver
     {
         ["wechat"] = new(
             ["Weixin.exe", "WeChat.exe"],
-            ["Weixin", "WeChat"],
+            ["Weixin", "WeChat", "WeixinAppEx"],
             ["微信", "Weixin", "WeChat"],
             [
                 @"%ProgramFiles%\Tencent\Weixin\Weixin.exe",
@@ -28,10 +28,10 @@ internal static class InstalledAppResolver
                 @"%LOCALAPPDATA%\Programs\Tencent\Weixin\Weixin.exe",
                 @"%LOCALAPPDATA%\Programs\Tencent\WeChat\WeChat.exe"
             ],
-            ["activate", "search"]),
+            ["activate", "search", "send_message"]),
         ["netease_music"] = new(
             ["cloudmusic.exe"],
-            ["cloudmusic"],
+            ["cloudmusic", "CloudMusic"],
             ["网易云音乐", "NetEase CloudMusic", "CloudMusic"],
             [
                 @"%ProgramFiles%\NetEase\CloudMusic\cloudmusic.exe",

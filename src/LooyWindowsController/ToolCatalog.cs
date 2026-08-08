@@ -18,7 +18,7 @@ internal static class ToolCatalog
         {
             tools.Add(Tool(
                 "windows.list_apps",
-                "列出用户在路遥电脑控制器中允许打开的应用及其别名。打开应用前优先调用本工具。",
+                "列出用户在路遥智控中允许打开的应用及其别名。打开应用前优先调用本工具。",
                 Properties()));
             tools.Add(Tool(
                 "windows.open_app",
@@ -32,11 +32,13 @@ internal static class ToolCatalog
                     Required("app", "string", "应用别名。"))));
             tools.Add(Tool(
                 "windows.app_action",
-                "对指定白名单应用执行动作。支持激活窗口、应用内搜索，以及网易云等媒体应用的播放暂停和切歌。搜索动作还要求用户开启键盘权限，媒体动作还要求开启媒体权限。",
+                "对指定白名单应用执行动作。支持更稳健的窗口激活、应用内搜索、微信发送消息，以及网易云等媒体应用的播放暂停和切歌。所有输入前都会再次确认目标应用仍在前台。搜索和微信消息要求用户开启键盘权限，媒体动作要求开启媒体权限。",
                 Properties(
                     Required("app", "string", "应用别名，例如 wechat、netease_music。"),
-                    RequiredEnum("action", "应用动作。", "activate", "search", "play_pause", "previous", "next"),
-                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"))));
+                    RequiredEnum("action", "应用动作。", "activate", "search", "send_message", "play_pause", "previous", "next"),
+                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"),
+                    Optional("recipient", "string", "send_message 动作的微信联系人名称。"),
+                    Optional("message", "string", "send_message 动作要发送的消息，最长 1000 个字符。"))));
             tools.Add(Tool(
                 "windows.diagnose_apps",
                 "只读检查白名单应用的配置路径、自动发现路径、运行进程和可用动作。不会读取聊天内容或 MCP Token。",

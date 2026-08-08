@@ -8,13 +8,13 @@ internal sealed class AppEditorForm : Form
     private readonly TextBox _aliasBox = new();
     private readonly TextBox _displayNameBox = new();
     private readonly TextBox _targetBox = new();
-    private readonly CheckBox _enabledBox = new() { Text = "允许小智打开此应用", AutoSize = true };
+    private readonly CheckBox _enabledBox = new() { Text = "允许路遥使用此应用", AutoSize = true };
 
     public AppEntry? Result { get; private set; }
 
     public AppEditorForm(AppEntry? existing = null)
     {
-        Text = existing is null ? "添加允许的应用" : "编辑允许的应用";
+        Text = existing is null ? "添加可用应用" : "编辑可用应用";
         Width = 560;
         Height = 330;
         MinimumSize = new Size(520, 320);
@@ -23,13 +23,16 @@ internal sealed class AppEditorForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         Font = new Font("Microsoft YaHei UI", 9F);
+        BackColor = AppTheme.Canvas;
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(18),
             ColumnCount = 2,
-            RowCount = 6
+            RowCount = 6,
+            BackColor = AppTheme.Surface,
+            Margin = new Padding(18)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -43,12 +46,18 @@ internal sealed class AppEditorForm : Form
         AddField(layout, "英文别名", _aliasBox, 0);
         AddField(layout, "显示名称", _displayNameBox, 1);
         AddField(layout, "程序或协议", _targetBox, 2);
+        AppTheme.StyleTextBox(_aliasBox);
+        AppTheme.StyleTextBox(_displayNameBox);
+        AppTheme.StyleTextBox(_targetBox);
+        _enabledBox.ForeColor = AppTheme.Ink;
+        _enabledBox.BackColor = AppTheme.Surface;
+        _enabledBox.FlatStyle = FlatStyle.Flat;
         layout.Controls.Add(_enabledBox, 1, 3);
 
         var hint = new Label
         {
             AutoSize = true,
-            ForeColor = Color.DimGray,
+            ForeColor = AppTheme.Muted,
             Text = "示例：notepad.exe、C:\\Apps\\Example.exe、ms-settings:\n英文别名只能使用小写字母、数字、点、横线和下划线。"
         };
         layout.Controls.Add(hint, 1, 4);
@@ -61,6 +70,8 @@ internal sealed class AppEditorForm : Form
         };
         var saveButton = new Button { Text = "保存", Width = 90, Height = 32 };
         var cancelButton = new Button { Text = "取消", Width = 90, Height = 32, DialogResult = DialogResult.Cancel };
+        AppTheme.StyleButton(saveButton, ButtonKind.Primary);
+        AppTheme.StyleButton(cancelButton);
         saveButton.Click += SaveButton_Click;
         buttons.Controls.Add(saveButton);
         buttons.Controls.Add(cancelButton);
@@ -90,7 +101,8 @@ internal sealed class AppEditorForm : Form
         {
             Text = labelText,
             AutoSize = true,
-            Anchor = AnchorStyles.Left
+            Anchor = AnchorStyles.Left,
+            ForeColor = AppTheme.Ink
         };
         field.Dock = DockStyle.Fill;
         field.Margin = new Padding(3, 5, 3, 5);
