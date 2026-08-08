@@ -78,9 +78,19 @@ internal sealed class SettingsStore
             .Select(group => group.First())
             .ToList();
 
-        if (settings.Apps.Count == 0)
+        foreach (var defaultApp in AppEntry.CreateDefaults())
         {
-            settings.Apps = AppEntry.CreateDefaults();
+            if (!settings.Apps.Any(app => app.Alias.Equals(defaultApp.Alias, StringComparison.OrdinalIgnoreCase)))
+            {
+                settings.Apps.Add(defaultApp);
+            }
+        }
+
+        var neteaseMusic = settings.Apps.FirstOrDefault(app =>
+            app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase));
+        if (neteaseMusic is not null && InstalledAppResolver.IsProtocol(neteaseMusic.Target.Trim()))
+        {
+            neteaseMusic.Target = "cloudmusic.exe";
         }
     }
 }

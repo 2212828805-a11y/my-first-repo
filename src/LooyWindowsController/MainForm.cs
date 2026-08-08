@@ -24,6 +24,9 @@ internal sealed class MainForm : Form
     private readonly RichTextBox _logBox = new();
     private readonly DataGridView _appsGrid = new();
     private readonly Dictionary<string, CheckBox> _permissionBoxes = new();
+    private readonly HashSet<string> _sessionPermissions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Button _inputAccessButton = new() { Text = "授权键盘与鼠标", Width = 148, Height = 38 };
+    private readonly Label _inputAccessStateLabel = new() { AutoSize = true };
     private bool _initializing = true;
     private bool _emergencyStopped;
     private bool _closingAfterStop;
@@ -35,6 +38,7 @@ internal sealed class MainForm : Form
         _apps = new BindingList<AppEntry>(_settings.Apps.Select(app => app.Clone()).ToList());
         _windowsController = new WindowsController(
             IsPermissionEnabled,
+            RequestInputPermissionAsync,
             () => _apps.Select(app => app.Clone()).ToArray(),
             _settingsStore,
             WriteLog);
@@ -136,6 +140,7 @@ internal sealed class MainForm : Form
         AppTheme.StyleButton(_connectButton, ButtonKind.Primary);
         AppTheme.StyleButton(_disconnectButton);
         AppTheme.StyleButton(_emergencyButton, ButtonKind.Danger);
+        AppTheme.StyleButton(_inputAccessButton, ButtonKind.Primary);
         AppTheme.StyleTextBox(_endpointBox);
     }
 
@@ -252,11 +257,12 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             BackColor = AppTheme.Surface
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         layout.Controls.Add(AppTheme.SectionTitle("决定路遥可以做什么"), 0, 0);
@@ -267,6 +273,34 @@ internal sealed class MainForm : Form
             ForeColor = AppTheme.Muted,
             Anchor = AnchorStyles.Left
         }, 0, 1);
+
+        var inputAccessPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = AppTheme.SurfaceMuted,
+            Padding = new Padding(14, 10, 12, 10),
+            Margin = new Padding(0, 0, 0, 8)
+        };
+        inputAccessPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        inputAccessPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 168));
+        var inputCopy = new Panel { Dock = DockStyle.Fill, BackColor = AppTheme.SurfaceMuted };
+        inputCopy.Controls.Add(new Label
+        {
+            Text = "键盘与鼠标控制",
+            AutoSize = true,
+            Location = new Point(0, 1),
+            Font = new Font(Font, FontStyle.Bold),
+            ForeColor = AppTheme.Ink
+        });
+        _inputAccessStateLabel.Location = new Point(0, 28);
+        _inputAccessStateLabel.ForeColor = AppTheme.Muted;
+        inputCopy.Controls.Add(_inputAccessStateLabel);
+        inputAccessPanel.Controls.Add(inputCopy, 0, 0);
+        _inputAccessButton.Anchor = AnchorStyles.Right;
+        inputAccessPanel.Controls.Add(_inputAccessButton, 1, 0);
+        layout.Controls.Add(inputAccessPanel, 0, 2);
 
         var permissionPanel = new FlowLayoutPanel
         {
@@ -284,7 +318,7 @@ internal sealed class MainForm : Form
         AddPermission(permissionPanel, PermissionKeys.Keyboard, "键盘输入和快捷键", "能够向当前窗口输入文字并发送快捷键。", false);
         AddPermission(permissionPanel, PermissionKeys.Mouse, "鼠标移动、点击和滚动", "能够操作当前桌面，请谨慎开启。", false);
         AddPermission(permissionPanel, PermissionKeys.Screenshot, "截取屏幕", "截图可能包含聊天、账号或其他隐私信息。", false);
-        layout.Controls.Add(permissionPanel, 0, 2);
+        layout.Controls.Add(permissionPanel, 0, 3);
 
         var note = new Label
         {
@@ -293,7 +327,7 @@ internal sealed class MainForm : Form
             ForeColor = AppTheme.Muted,
             Anchor = AnchorStyles.Left
         };
-        layout.Controls.Add(note, 0, 3);
+        layout.Controls.Add(note, 0, 4);
         page.Controls.Add(layout);
         return page;
     }
@@ -481,6 +515,7 @@ internal sealed class MainForm : Form
         {
             pair.Value.Checked = _settings.Permissions.TryGetValue(pair.Key, out var enabled) && enabled;
         }
+        UpdateInputAccessState();
     }
 
     private void WireEvents()
@@ -509,6 +544,7 @@ internal sealed class MainForm : Form
                 EditSelectedApp();
             }
         };
+        _inputAccessButton.Click += InputAccessButton_Click;
         Shown += MainForm_Shown;
         FormClosing += MainForm_FormClosing;
     }
@@ -527,6 +563,130 @@ internal sealed class MainForm : Form
     }
 
     private void ConnectButton_Click(object? sender, EventArgs eventArgs) => ConnectToEndpoint();
+
+    private async void InputAccessButton_Click(object? sender, EventArgs eventArgs)
+    {
+        var approved = ShowInputAuthorizationDialog(
+            null,
+            "允许路遥在你确认后操作当前窗口");
+        if (approved)
+        {
+            await _mcpClient.NotifyToolsChangedAsync();
+        }
+    }
+
+    private async Task<bool> RequestInputPermissionAsync(
+        string permission,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (IsPermissionEnabled(permission))
+        {
+            return true;
+        }
+        if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellationRegistration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+        void ShowDialogOnUi()
+        {
+            if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
+            {
+                completion.TrySetResult(false);
+                return;
+            }
+            completion.TrySetResult(ShowInputAuthorizationDialog(permission, reason));
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(ShowDialogOnUi);
+            }
+            catch
+            {
+                completion.TrySetResult(false);
+            }
+        }
+        else
+        {
+            ShowDialogOnUi();
+        }
+
+        try
+        {
+            return await completion.Task;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private bool ShowInputAuthorizationDialog(string? requiredPermission, string reason)
+    {
+        using var dialog = new InputAuthorizationForm(requiredPermission, reason);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            WriteLog("用户取消了键盘与鼠标授权。");
+            return false;
+        }
+
+        _emergencyStopped = false;
+        var selected = dialog.SelectedPermissions;
+        if (dialog.Persistence == InputAuthorizationPersistence.Session)
+        {
+            foreach (var permission in selected)
+            {
+                _sessionPermissions.Add(permission);
+            }
+            WriteLog("已授权本次连接使用键盘或鼠标；断开连接后自动撤回。");
+        }
+        else if (dialog.Persistence == InputAuthorizationPersistence.Always)
+        {
+            var wasInitializing = _initializing;
+            _initializing = true;
+            try
+            {
+                foreach (var permission in selected)
+                {
+                    _settings.Permissions[permission] = true;
+                    if (_permissionBoxes.TryGetValue(permission, out var permissionBox))
+                    {
+                        permissionBox.Checked = true;
+                    }
+                }
+            }
+            finally
+            {
+                _initializing = wasInitializing;
+            }
+            SaveSettingsSafe();
+            WriteLog("已保存键盘与鼠标授权；可在“授权管理”中随时撤回。");
+        }
+
+        UpdateInputAccessState();
+        return requiredPermission is null || IsPermissionEnabled(requiredPermission);
+    }
+
+    private void UpdateInputAccessState()
+    {
+        var keyboard = IsPermissionEnabled(PermissionKeys.Keyboard);
+        var mouse = IsPermissionEnabled(PermissionKeys.Mouse);
+        _inputAccessStateLabel.Text = (keyboard, mouse) switch
+        {
+            (true, true) => "键盘和鼠标已授权",
+            (true, false) => "键盘已授权，鼠标未授权",
+            (false, true) => "鼠标已授权，键盘未授权",
+            _ => "尚未授权；首次调用时也会弹窗询问"
+        };
+        _inputAccessStateLabel.ForeColor = keyboard || mouse ? AppTheme.Success : AppTheme.Muted;
+        _inputAccessButton.Text = keyboard && mouse ? "调整授权" : "授权键盘与鼠标";
+    }
 
     private void ConnectToEndpoint()
     {
@@ -575,17 +735,31 @@ internal sealed class MainForm : Form
     {
         _disconnectButton.Enabled = false;
         await _mcpClient.StopAsync();
+        _sessionPermissions.Clear();
+        UpdateInputAccessState();
         _connectButton.Enabled = true;
     }
 
     private async void EmergencyButton_Click(object? sender, EventArgs eventArgs)
     {
-        _emergencyStopped = true;
-        foreach (var pair in _permissionBoxes)
+        var wasInitializing = _initializing;
+        _initializing = true;
+        try
         {
-            pair.Value.Checked = pair.Key == PermissionKeys.SystemStatus;
+            foreach (var pair in _permissionBoxes)
+            {
+                pair.Value.Checked = pair.Key == PermissionKeys.SystemStatus;
+                _settings.Permissions[pair.Key] = pair.Value.Checked;
+            }
         }
+        finally
+        {
+            _initializing = wasInitializing;
+        }
+        _emergencyStopped = true;
+        _sessionPermissions.Clear();
         SaveSettingsSafe();
+        UpdateInputAccessState();
         WriteLog("已触发紧急停止：控制权限全部关闭，MCP 连接正在断开。");
         await DisconnectAsync();
         MessageBox.Show(
@@ -603,11 +777,20 @@ internal sealed class MainForm : Form
         }
 
         _emergencyStopped = false;
+        if (sender is CheckBox changedBox && !changedBox.Checked)
+        {
+            var revoked = _permissionBoxes.FirstOrDefault(pair => ReferenceEquals(pair.Value, changedBox)).Key;
+            if (!string.IsNullOrWhiteSpace(revoked))
+            {
+                _sessionPermissions.Remove(revoked);
+            }
+        }
         foreach (var pair in _permissionBoxes)
         {
             _settings.Permissions[pair.Key] = pair.Value.Checked;
         }
         SaveSettingsSafe();
+        UpdateInputAccessState();
         await _mcpClient.NotifyToolsChangedAsync();
     }
 
@@ -752,8 +935,8 @@ internal sealed class MainForm : Form
     private bool IsPermissionEnabled(string key)
     {
         return !_emergencyStopped
-               && _settings.Permissions.TryGetValue(key, out var enabled)
-               && enabled;
+               && ((_settings.Permissions.TryGetValue(key, out var enabled) && enabled)
+                   || _sessionPermissions.Contains(key));
     }
 
     private void SaveSettingsSafe()

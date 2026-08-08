@@ -29,6 +29,19 @@ internal static class InstalledAppResolver
                 @"%LOCALAPPDATA%\Programs\Tencent\WeChat\WeChat.exe"
             ],
             ["activate", "search", "send_message"]),
+        ["qq"] = new(
+            ["QQ.exe"],
+            ["QQ"],
+            ["腾讯QQ", "QQ", "Tencent QQ"],
+            [
+                @"%ProgramFiles%\Tencent\QQNT\QQ.exe",
+                @"%ProgramFiles(x86)%\Tencent\QQNT\QQ.exe",
+                @"%LOCALAPPDATA%\Programs\QQ\QQ.exe",
+                @"%LOCALAPPDATA%\Tencent\QQ\QQ.exe",
+                @"%ProgramFiles%\Tencent\QQ\Bin\QQ.exe",
+                @"%ProgramFiles(x86)%\Tencent\QQ\Bin\QQ.exe"
+            ],
+            ["activate", "search", "send_message"]),
         ["netease_music"] = new(
             ["cloudmusic.exe"],
             ["cloudmusic", "CloudMusic"],
@@ -40,6 +53,12 @@ internal static class InstalledAppResolver
                 @"%LOCALAPPDATA%\Programs\NetEase\CloudMusic\cloudmusic.exe"
             ],
             ["activate", "search", "play_pause", "previous", "next"]),
+        ["notepad"] = new(
+            ["notepad.exe"],
+            ["notepad"],
+            ["记事本", "Notepad"],
+            [@"%WINDIR%\System32\notepad.exe"],
+            ["activate", "new_document", "write_text", "new_and_write"]),
         ["chrome"] = new(
             ["chrome.exe"],
             ["chrome"],
@@ -49,7 +68,7 @@ internal static class InstalledAppResolver
                 @"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
                 @"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
             ],
-            ["activate", "search"]),
+            ["activate"]),
         ["vscode"] = new(
             ["Code.exe"],
             ["Code"],
@@ -77,11 +96,8 @@ internal static class InstalledAppResolver
     public static string? TryResolvePath(AppEntry app)
     {
         var expandedTarget = Environment.ExpandEnvironmentVariables(app.Target.Trim());
-        if (IsProtocol(expandedTarget))
-        {
-            return expandedTarget;
-        }
-        if (Path.IsPathRooted(expandedTarget) && File.Exists(expandedTarget))
+        var protocolTarget = IsProtocol(expandedTarget);
+        if (!protocolTarget && Path.IsPathRooted(expandedTarget) && File.Exists(expandedTarget))
         {
             return Path.GetFullPath(expandedTarget);
         }
@@ -147,7 +163,7 @@ internal static class InstalledAppResolver
             }
         }
 
-        return null;
+        return protocolTarget ? expandedTarget : null;
     }
 
     public static IReadOnlyList<string> GetProcessNames(AppEntry app, string? resolvedTarget = null)
