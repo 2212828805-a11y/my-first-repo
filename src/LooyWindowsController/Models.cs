@@ -63,6 +63,7 @@ internal sealed class AppEntry
         new() { Alias = "edge", DisplayName = "Microsoft Edge", Target = "microsoft-edge:" },
         new() { Alias = "chrome", DisplayName = "Google Chrome", Target = "chrome.exe", Enabled = false },
         new() { Alias = "wechat", DisplayName = "微信", Target = "WeChat.exe", Enabled = false },
+        new() { Alias = "qq", DisplayName = "QQ", Target = "QQ.exe", Enabled = false },
         new() { Alias = "douyin", DisplayName = "抖音", Target = "Douyin.exe", Enabled = false },
         new() { Alias = "netease_music", DisplayName = "网易云音乐", Target = "cloudmusic.exe", Enabled = false },
         new() { Alias = "vscode", DisplayName = "Visual Studio Code", Target = "Code.exe", Enabled = false }

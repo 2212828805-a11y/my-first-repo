@@ -46,7 +46,7 @@ try {
     $DotNet = Resolve-DotNet
     Write-Host "dotnet 路径：$DotNet"
     & $DotNet --info
-    Write-Host "正在构建路遥电脑控制器……" -ForegroundColor Cyan
+    Write-Host "正在构建路遥智控……" -ForegroundColor Cyan
 
     if (Test-Path $PublishDirectory) {
         Remove-Item $PublishDirectory -Recurse -Force

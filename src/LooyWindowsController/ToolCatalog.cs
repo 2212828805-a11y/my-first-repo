@@ -18,7 +18,7 @@ internal static class ToolCatalog
         {
             tools.Add(Tool(
                 "windows.list_apps",
-                "列出用户在路遥电脑控制器中允许打开的应用及其别名。打开应用前优先调用本工具。",
+                "列出用户在路遥智控中允许打开的应用及其别名。打开应用前优先调用本工具。",
                 Properties()));
             tools.Add(Tool(
                 "windows.open_app",
@@ -32,11 +32,14 @@ internal static class ToolCatalog
                     Required("app", "string", "应用别名。"))));
             tools.Add(Tool(
                 "windows.app_action",
-                "对指定白名单应用执行动作。支持激活窗口、应用内搜索，以及网易云等媒体应用的播放暂停和切歌。搜索动作还要求用户开启键盘权限，媒体动作还要求开启媒体权限。",
+                "对指定白名单应用执行动作。支持窗口激活、应用内搜索、微信或 QQ 发消息、记事本新建与写入，以及媒体播放控制。键盘未授权时会先在电脑上弹出授权窗口；输入前会确认目标应用仍在前台。",
                 Properties(
-                    Required("app", "string", "应用别名，例如 wechat、netease_music。"),
-                    RequiredEnum("action", "应用动作。", "activate", "search", "play_pause", "previous", "next"),
-                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"))));
+                    Required("app", "string", "应用别名，例如 wechat、qq、netease_music、notepad。"),
+                    RequiredEnum("action", "应用动作。", "activate", "search", "send_message", "new_document", "write_text", "new_and_write", "play_pause", "previous", "next"),
+                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"),
+                    Optional("recipient", "string", "send_message 动作的微信或 QQ 联系人名称。"),
+                    Optional("message", "string", "send_message 动作要发送的消息，最长 1000 个字符。"),
+                    Optional("text", "string", "write_text 或 new_and_write 动作写入记事本的内容。"))));
             tools.Add(Tool(
                 "windows.diagnose_apps",
                 "只读检查白名单应用的配置路径、自动发现路径、运行进程和可用动作。不会读取聊天内容或 MCP Token。",
@@ -52,48 +55,46 @@ internal static class ToolCatalog
                     Required("url", "string", "完整的 http 或 https 地址。"))));
             tools.Add(Tool(
                 "windows.web_search",
-                "使用默认浏览器搜索关键词。适合用户说‘搜索……’或‘帮我查……’。",
+                "直接在默认浏览器打开搜索结果。用户要求浏览器搜索时优先调用本工具，不要先打开浏览器再用应用内搜索。",
                 Properties(
                     Required("query", "string", "要搜索的内容。"),
-                    OptionalEnum("engine", "搜索引擎，默认 baidu。", "baidu", "bing"))));
+                    OptionalEnum("engine", "搜索引擎，默认 baidu。", "baidu", "bing", "google"))));
         }
 
-        if (permissionEnabled(PermissionKeys.Keyboard))
-        {
-            tools.Add(Tool(
-                "windows.type_text",
-                "向当前获得焦点的输入框键入文字。调用前必须确认正确窗口和输入框已获得焦点。",
-                Properties(
-                    Required("text", "string", "要输入的文字，最长 4000 个字符。"))));
-            tools.Add(Tool(
-                "windows.hotkey",
-                "在当前窗口按下键盘快捷键，例如 ctrl+l、ctrl+c、ctrl+v、alt+tab。",
-                Properties(
-                    Required("keys", "string", "使用加号连接的快捷键，例如 ctrl+shift+s。"))));
-        }
+        tools.Add(Tool(
+            "windows.type_text",
+            "向当前获得焦点的输入框键入文字。未授权时会先在电脑上弹出键盘授权窗口。调用前必须确认正确窗口。",
+            Properties(
+                Required("text", "string", "要输入的文字，最长 4000 个字符。"))));
+        tools.Add(Tool(
+            "windows.hotkey",
+            "在当前窗口按下键盘快捷键。未授权时会先弹出授权窗口。",
+            Properties(
+                Required("keys", "string", "使用加号连接的快捷键，例如 ctrl+shift+s。"))));
 
-        if (permissionEnabled(PermissionKeys.Mouse))
-        {
-            tools.Add(Tool(
-                "windows.move_mouse",
-                "把鼠标移动到屏幕绝对坐标。坐标必须位于当前虚拟屏幕范围内。",
-                Properties(
-                    Required("x", "integer", "目标横坐标。"),
-                    Required("y", "integer", "目标纵坐标。"))));
-            tools.Add(Tool(
-                "windows.click",
-                "点击鼠标。可省略坐标以点击当前位置；默认单击左键。",
-                Properties(
-                    Optional("x", "integer", "可选横坐标。"),
-                    Optional("y", "integer", "可选纵坐标。"),
-                    OptionalEnum("button", "鼠标按键。", "left", "right", "middle"),
-                    OptionalInteger("clicks", "点击次数，只允许 1 或 2。", 1, 2))));
-            tools.Add(Tool(
-                "windows.scroll",
-                "在当前鼠标位置滚动页面。正数向上，负数向下，范围 -20 到 20。",
-                Properties(
-                    RequiredInteger("amount", "滚动格数。", -20, 20))));
-        }
+        tools.Add(Tool(
+            "windows.cursor_position",
+            "读取当前鼠标指针坐标。未授权时会先在电脑上弹出鼠标授权窗口。",
+            Properties()));
+        tools.Add(Tool(
+            "windows.move_mouse",
+            "把鼠标移动到屏幕绝对坐标。未授权时会先弹出授权窗口。",
+            Properties(
+                Required("x", "integer", "目标横坐标。"),
+                Required("y", "integer", "目标纵坐标。"))));
+        tools.Add(Tool(
+            "windows.click",
+            "点击鼠标。可省略坐标以点击当前位置；默认单击左键。未授权时会先弹出授权窗口。",
+            Properties(
+                Optional("x", "integer", "可选横坐标。"),
+                Optional("y", "integer", "可选纵坐标。"),
+                OptionalEnum("button", "鼠标按键。", "left", "right", "middle"),
+                OptionalInteger("clicks", "点击次数，只允许 1 或 2。", 1, 2))));
+        tools.Add(Tool(
+            "windows.scroll",
+            "在当前鼠标位置滚动页面。正数向上，负数向下，范围 -20 到 20。未授权时会先弹出授权窗口。",
+            Properties(
+                RequiredInteger("amount", "滚动格数。", -20, 20))));
 
         if (permissionEnabled(PermissionKeys.Media))
         {

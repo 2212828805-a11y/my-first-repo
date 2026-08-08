@@ -1,12 +1,12 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title 构建路遥电脑控制器
+title 构建路遥智控
 set "BUILD_SCRIPT=%~dp0scripts\build-windows.ps1"
 set "BUILD_LOG=%~dp0build.log"
 
 echo ============================================================
-echo               路遥电脑控制器 Windows 构建工具
+echo                    路遥智控 Windows 构建工具
 echo ============================================================
 echo.
 

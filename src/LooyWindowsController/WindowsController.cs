@@ -17,20 +17,29 @@ internal sealed class WindowsController
     private const uint MouseEventMiddleUp = 0x0040;
     private const uint MouseEventWheel = 0x0800;
     private const uint InputKeyboard = 1;
+    private const int ExpectedInputSizeX86 = 28;
+    private const int ExpectedInputSizeX64 = 40;
+    private const uint GetAncestorRootOwner = 3;
 
     private readonly Func<string, bool> _permissionEnabled;
+    private readonly Func<string, string, CancellationToken, Task<bool>> _requestInputPermission;
     private readonly Func<IReadOnlyList<AppEntry>> _getApps;
     private readonly SettingsStore _settingsStore;
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _actionLock = new(1, 1);
 
+    internal static bool IsNativeInputLayoutValid =>
+        Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
+
     public WindowsController(
         Func<string, bool> permissionEnabled,
+        Func<string, string, CancellationToken, Task<bool>> requestInputPermission,
         Func<IReadOnlyList<AppEntry>> getApps,
         SettingsStore settingsStore,
         Action<string> log)
     {
         _permissionEnabled = permissionEnabled;
+        _requestInputPermission = requestInputPermission;
         _getApps = getApps;
         _settingsStore = settingsStore;
         _log = log;
@@ -54,12 +63,16 @@ internal sealed class WindowsController
                 "windows.close_app" => RequirePermission(
                     PermissionKeys.Applications,
                     () => CloseApp(RequiredString(arguments, "app"))),
-                "windows.app_action" => RequirePermission(
-                    PermissionKeys.Applications,
-                    () => AppAction(
+                "windows.app_action" => !_permissionEnabled(PermissionKeys.Applications)
+                    ? ToolExecutionResult.Fail("用户尚未在路遥智控中授权此项操作。")
+                    : await AppActionAsync(
                         RequiredString(arguments, "app"),
                         RequiredString(arguments, "action"),
-                        OptionalString(arguments, "query", string.Empty))),
+                        OptionalString(arguments, "query", string.Empty),
+                        OptionalString(arguments, "recipient", string.Empty),
+                        OptionalString(arguments, "message", string.Empty),
+                        OptionalString(arguments, "text", string.Empty),
+                        cancellationToken),
                 "windows.diagnose_apps" => RequirePermission(PermissionKeys.Applications, DiagnoseApps),
                 "windows.open_url" => RequirePermission(
                     PermissionKeys.Web,
@@ -69,19 +82,36 @@ internal sealed class WindowsController
                     () => WebSearch(
                         RequiredString(arguments, "query"),
                         OptionalString(arguments, "engine", "baidu"))),
-                "windows.type_text" => RequirePermission(
+                "windows.type_text" => await RequireInputPermissionAsync(
                     PermissionKeys.Keyboard,
-                    () => TypeText(RequiredString(arguments, "text"))),
-                "windows.hotkey" => RequirePermission(
+                    "向当前窗口输入文字",
+                    () => TypeText(RequiredString(arguments, "text")),
+                    cancellationToken),
+                "windows.hotkey" => await RequireInputPermissionAsync(
                     PermissionKeys.Keyboard,
-                    () => PressHotkey(RequiredString(arguments, "keys"))),
-                "windows.move_mouse" => RequirePermission(
+                    "向当前窗口发送键盘快捷键",
+                    () => PressHotkey(RequiredString(arguments, "keys")),
+                    cancellationToken),
+                "windows.cursor_position" => await RequireInputPermissionAsync(
                     PermissionKeys.Mouse,
-                    () => MoveMouse(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"))),
-                "windows.click" => RequirePermission(PermissionKeys.Mouse, () => Click(arguments)),
-                "windows.scroll" => RequirePermission(
+                    "读取当前鼠标位置",
+                    GetCursorPosition,
+                    cancellationToken),
+                "windows.move_mouse" => await RequireInputPermissionAsync(
                     PermissionKeys.Mouse,
-                    () => Scroll(RequiredInt(arguments, "amount"))),
+                    "移动鼠标指针",
+                    () => MoveMouse(RequiredInt(arguments, "x"), RequiredInt(arguments, "y")),
+                    cancellationToken),
+                "windows.click" => await RequireInputPermissionAsync(
+                    PermissionKeys.Mouse,
+                    "点击鼠标",
+                    () => Click(arguments),
+                    cancellationToken),
+                "windows.scroll" => await RequireInputPermissionAsync(
+                    PermissionKeys.Mouse,
+                    "滚动当前窗口",
+                    () => Scroll(RequiredInt(arguments, "amount")),
+                    cancellationToken),
                 "windows.media_control" => RequirePermission(
                     PermissionKeys.Media,
                     () => MediaControl(
@@ -114,7 +144,25 @@ internal sealed class WindowsController
     {
         return _permissionEnabled(permission)
             ? action()
-            : ToolExecutionResult.Fail("用户尚未在路遥电脑控制器中授权此项操作。");
+            : ToolExecutionResult.Fail("用户尚未在路遥智控中授权此项操作。");
+    }
+
+    private async Task<ToolExecutionResult> RequireInputPermissionAsync(
+        string permission,
+        string reason,
+        Func<ToolExecutionResult> action,
+        CancellationToken cancellationToken)
+    {
+        if (!_permissionEnabled(permission)
+            && !await _requestInputPermission(permission, reason, cancellationToken))
+        {
+            return ToolExecutionResult.Fail("用户没有授权本次键盘或鼠标操作，操作已取消。");
+        }
+        if (!_permissionEnabled(permission))
+        {
+            return ToolExecutionResult.Fail("键盘或鼠标授权当前不可用，操作已取消。");
+        }
+        return action();
     }
 
     private static ToolExecutionResult GetSystemStatus()
@@ -125,6 +173,8 @@ internal sealed class WindowsController
             $"当前用户：{Environment.UserName}",
             $"系统：{Environment.OSVersion}",
             $"64 位系统：{Environment.Is64BitOperatingSystem}",
+            $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
+            $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
             $"当前时间：{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}",
             "控制器状态：在线");
         return ToolExecutionResult.Ok(message);
@@ -162,9 +212,13 @@ internal sealed class WindowsController
             FileName = target,
             UseShellExecute = true
         };
+        if (!InstalledAppResolver.IsProtocol(target) && Path.IsPathRooted(target))
+        {
+            startInfo.WorkingDirectory = Path.GetDirectoryName(target) ?? string.Empty;
+        }
         Process.Start(startInfo);
-        _log($"已打开应用：{app.DisplayName}");
-        return ToolExecutionResult.Ok($"已打开 {app.DisplayName}。");
+        _log($"已向 Windows 请求打开应用：{app.DisplayName}");
+        return ToolExecutionResult.Ok($"Windows 已接收 {app.DisplayName} 的打开请求。");
     }
 
     private ToolExecutionResult CloseApp(string alias)
@@ -176,7 +230,7 @@ internal sealed class WindowsController
         }
 
         var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
-        if (InstalledAppResolver.IsProtocol(app.Target.Trim()))
+        if (string.IsNullOrWhiteSpace(resolvedTarget) || InstalledAppResolver.IsProtocol(resolvedTarget))
         {
             return ToolExecutionResult.Fail("该应用使用系统协议启动，无法安全确定对应进程。请手动关闭。");
         }
@@ -212,7 +266,14 @@ internal sealed class WindowsController
         return ToolExecutionResult.Ok($"已请求 {app.DisplayName} 正常关闭，共 {requested} 个窗口。");
     }
 
-    private ToolExecutionResult AppAction(string alias, string action, string query)
+    private async Task<ToolExecutionResult> AppActionAsync(
+        string alias,
+        string action,
+        string query,
+        string recipient,
+        string message,
+        string text,
+        CancellationToken cancellationToken)
     {
         var app = ResolveApp(alias);
         if (app is null)
@@ -228,59 +289,113 @@ internal sealed class WindowsController
         }
         if (normalizedAction == "search")
         {
-            if (!_permissionEnabled(PermissionKeys.Keyboard))
-            {
-                return ToolExecutionResult.Fail("应用内搜索需要先在“权限”页面开启键盘权限。");
-            }
             if (string.IsNullOrWhiteSpace(query) || query.Trim().Length > 200)
             {
                 return ToolExecutionResult.Fail("搜索关键词不能为空且不能超过 200 个字符。");
+            }
+        }
+        else if (normalizedAction == "send_message")
+        {
+            if (!app.Alias.Equals("wechat", StringComparison.OrdinalIgnoreCase)
+                && !app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolExecutionResult.Fail("发送消息动作目前只支持微信和 QQ。");
+            }
+            recipient = recipient.Trim();
+            message = message.Trim();
+            if (recipient.Length is < 1 or > 80)
+            {
+                return ToolExecutionResult.Fail("联系人不能为空且不能超过 80 个字符。");
+            }
+            if (message.Length is < 1 or > 1000)
+            {
+                return ToolExecutionResult.Fail("消息不能为空且不能超过 1000 个字符。");
+            }
+        }
+        else if (normalizedAction is "write_text" or "new_and_write")
+        {
+            text = text.TrimEnd();
+            if (text.Length is < 1 or > 4000)
+            {
+                return ToolExecutionResult.Fail("写入内容不能为空且不能超过 4000 个字符。");
             }
         }
         else if (normalizedAction is "play_pause" or "previous" or "next")
         {
             if (!_permissionEnabled(PermissionKeys.Media))
             {
-                return ToolExecutionResult.Fail("媒体动作需要先在“权限”页面开启媒体权限。");
+                return ToolExecutionResult.Fail("媒体动作需要先在“授权管理”中开启媒体权限。");
             }
         }
-        else if (normalizedAction != "activate")
+        else if (normalizedAction is not "activate" and not "new_document")
         {
             return ToolExecutionResult.Fail("不支持的应用动作。");
         }
 
-        var activation = ActivateAppWindow(app);
-        if (!activation.Success)
+        if (normalizedAction is "search" or "send_message" or "write_text" or "new_document" or "new_and_write")
         {
-            return activation;
+            var reason = normalizedAction switch
+            {
+                "search" => $"在 {app.DisplayName} 中搜索",
+                "send_message" => $"在 {app.DisplayName} 中选择联系人并发送消息",
+                "write_text" or "new_and_write" => "在记事本中创建并写入内容",
+                _ => "在记事本中新建文档"
+            };
+            if (!_permissionEnabled(PermissionKeys.Keyboard)
+                && !await _requestInputPermission(PermissionKeys.Keyboard, reason, cancellationToken))
+            {
+                return ToolExecutionResult.Fail("用户未授权键盘操作，本次调用已取消。");
+            }
+        }
+
+        var activation = await ActivateAppWindowAsync(app, cancellationToken);
+        if (!activation.Result.Success)
+        {
+            return activation.Result;
         }
 
         if (normalizedAction == "activate")
         {
-            return activation;
+            return activation.Result;
         }
 
-        Thread.Sleep(250);
+        var processNames = activation.ProcessNames;
+        var handle = activation.Handle;
+        if (handle == IntPtr.Zero)
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 已收到打开请求，但暂时没有可操作窗口。请等应用显示完成后重试。");
+        }
+
+        await Task.Delay(350, cancellationToken);
         if (normalizedAction == "search")
         {
-            var hotkeyResult = PressHotkey("ctrl+f");
-            if (!hotkeyResult.Success)
+            return await SearchInAppAsync(app, handle, processNames, query.Trim(), cancellationToken);
+        }
+
+        if (normalizedAction == "send_message")
+        {
+            return await SendChatMessageAsync(app, handle, processNames, recipient, message, cancellationToken);
+        }
+
+        if (normalizedAction == "new_document")
+        {
+            return await NewNotepadDocumentAsync(handle, processNames, cancellationToken);
+        }
+
+        if (normalizedAction == "write_text")
+        {
+            return await WriteNotepadTextAsync(handle, processNames, text, cancellationToken);
+        }
+
+        if (normalizedAction == "new_and_write")
+        {
+            var newResult = await NewNotepadDocumentAsync(handle, processNames, cancellationToken);
+            if (!newResult.Success)
             {
-                return hotkeyResult;
+                return newResult;
             }
-            Thread.Sleep(180);
-            var typeResult = TypeText(query.Trim());
-            if (!typeResult.Success)
-            {
-                return typeResult;
-            }
-            if (app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase))
-            {
-                Thread.Sleep(180);
-                PressHotkey("enter");
-            }
-            _log($"已在 {app.DisplayName} 中搜索：{query.Trim()}");
-            return ToolExecutionResult.Ok($"已在 {app.DisplayName} 中输入搜索内容：{query.Trim()}。");
+            await Task.Delay(220, cancellationToken);
+            return await WriteNotepadTextAsync(handle, processNames, text, cancellationToken);
         }
 
         var mediaResult = MediaControl(normalizedAction, 1);
@@ -291,44 +406,269 @@ internal sealed class WindowsController
         return mediaResult;
     }
 
-    private ToolExecutionResult ActivateAppWindow(AppEntry app)
+    private readonly record struct AppActivation(
+        ToolExecutionResult Result,
+        IntPtr Handle,
+        IReadOnlyList<string> ProcessNames);
+
+    private async Task<AppActivation> ActivateAppWindowAsync(
+        AppEntry app,
+        CancellationToken cancellationToken)
     {
         var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
         var processNames = InstalledAppResolver.GetProcessNames(app, resolvedTarget);
         var handle = FindMainWindow(processNames);
+        var launched = false;
         if (handle == IntPtr.Zero)
         {
             var openResult = OpenApp(app.Alias);
             if (!openResult.Success)
             {
-                return openResult;
+                return new AppActivation(openResult, IntPtr.Zero, processNames);
             }
-            for (var attempt = 0; attempt < 30 && handle == IntPtr.Zero; attempt++)
+            launched = true;
+            if (processNames.Count == 0)
             {
-                Thread.Sleep(200);
+                return new AppActivation(openResult, IntPtr.Zero, processNames);
+            }
+            var maxAttempts = app.Alias is "netease_music" or "wechat" or "qq" ? 60 : 40;
+            for (var attempt = 0; attempt < maxAttempts && handle == IntPtr.Zero; attempt++)
+            {
+                await Task.Delay(250, cancellationToken);
+                if (attempt % 4 == 3)
+                {
+                    resolvedTarget = InstalledAppResolver.TryResolvePath(app);
+                    processNames = InstalledAppResolver.GetProcessNames(app, resolvedTarget);
+                }
                 handle = FindMainWindow(processNames);
             }
         }
 
         if (handle == IntPtr.Zero)
         {
-            return ToolExecutionResult.Fail($"已启动 {app.DisplayName}，但没有检测到可激活的主窗口。应用可能仍在启动或缩小到托盘。");
+            var result = launched
+                ? ToolExecutionResult.Ok($"Windows 已接收 {app.DisplayName} 的打开请求；应用可能已经显示，但暂时没有获得可操作窗口。")
+                : ToolExecutionResult.Fail($"没有找到 {app.DisplayName} 的可操作窗口。");
+            return new AppActivation(result, IntPtr.Zero, processNames);
         }
 
-        if (IsIconic(handle))
+        var activated = false;
+        for (var attempt = 0; attempt < 3 && !activated; attempt++)
         {
-            ShowWindow(handle, 9);
+            activated = TryBringWindowToFront(handle, processNames);
+            if (!activated)
+            {
+                await Task.Delay(180, cancellationToken);
+            }
         }
-        if (!SetForegroundWindow(handle))
+        if (!activated)
         {
-            return ToolExecutionResult.Fail($"Windows 阻止了 {app.DisplayName} 获取前台焦点，请先手动点击一次该窗口。");
+            return new AppActivation(
+                ToolExecutionResult.Ok($"{app.DisplayName} 已打开，但 Windows 没有允许自动切到前台。需要操作时请点击一次应用窗口。"),
+                handle,
+                processNames);
         }
         _log($"已激活应用窗口：{app.DisplayName}");
-        return ToolExecutionResult.Ok($"已激活 {app.DisplayName} 窗口。");
+        return new AppActivation(ToolExecutionResult.Ok($"已打开并激活 {app.DisplayName}。"), handle, processNames);
+    }
+
+    private async Task<ToolExecutionResult> SearchInAppAsync(
+        AppEntry app,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string query,
+        CancellationToken cancellationToken)
+    {
+        if (!EnsureTargetIsForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 没有保持在前台，已取消输入，避免把搜索词发到错误窗口。");
+        }
+
+        PressHotkey("esc");
+        await Task.Delay(100, cancellationToken);
+        var hotkeyResult = PressHotkey("ctrl+f");
+        if (!hotkeyResult.Success)
+        {
+            return hotkeyResult;
+        }
+
+        var focusDelay = app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase) ? 650 : 420;
+        await Task.Delay(focusDelay, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 的窗口失去前台，已停止输入，请重试。");
+        }
+
+        var selectAllResult = PressHotkey("ctrl+a");
+        if (!selectAllResult.Success)
+        {
+            return selectAllResult;
+        }
+        await Task.Delay(80, cancellationToken);
+        if (!_permissionEnabled(PermissionKeys.Keyboard))
+        {
+            return ToolExecutionResult.Fail("键盘授权已撤回，搜索已停止。");
+        }
+        var typeResult = TypeText(query);
+        if (!typeResult.Success)
+        {
+            return typeResult;
+        }
+
+        if (app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase))
+        {
+            await Task.Delay(320, cancellationToken);
+            if (!IsTargetWindowForeground(handle, processNames))
+            {
+                return ToolExecutionResult.Fail("网易云音乐在提交搜索前失去焦点，已取消操作。");
+            }
+            var enterResult = PressHotkey("enter");
+            if (!enterResult.Success)
+            {
+                return enterResult;
+            }
+        }
+
+        _log($"已在 {app.DisplayName} 中搜索：{query}");
+        return ToolExecutionResult.Ok($"已在 {app.DisplayName} 中搜索：{query}。");
+    }
+
+    private async Task<ToolExecutionResult> SendChatMessageAsync(
+        AppEntry app,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string recipient,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        if (!EnsureTargetIsForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 没有保持在前台，已取消发送，避免消息进入错误窗口。");
+        }
+
+        PressHotkey("esc");
+        await Task.Delay(120, cancellationToken);
+        var searchResult = PressHotkey("ctrl+f");
+        if (!searchResult.Success)
+        {
+            return searchResult;
+        }
+        var searchDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 700 : 500;
+        await Task.Delay(searchDelay, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 的窗口失去前台，已取消发送。");
+        }
+
+        var selectAllResult = PressHotkey("ctrl+a");
+        if (!selectAllResult.Success)
+        {
+            return selectAllResult;
+        }
+        await Task.Delay(80, cancellationToken);
+        var recipientResult = TypeText(recipient);
+        if (!recipientResult.Success)
+        {
+            return recipientResult;
+        }
+
+        var resultDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 1100 : 900;
+        await Task.Delay(resultDelay, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"等待 {app.DisplayName} 联系人结果时窗口失去前台，消息未发送。");
+        }
+        var openConversationResult = PressHotkey("enter");
+        if (!openConversationResult.Success)
+        {
+            return openConversationResult;
+        }
+
+        await Task.Delay(600, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"打开 {app.DisplayName} 会话后窗口失去前台，消息未发送。");
+        }
+        if (!_permissionEnabled(PermissionKeys.Keyboard))
+        {
+            return ToolExecutionResult.Fail("键盘授权已撤回，消息未输入。");
+        }
+        var messageResult = TypeText(message);
+        if (!messageResult.Success)
+        {
+            return messageResult;
+        }
+
+        await Task.Delay(120, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 在发送前失去前台，消息内容已输入但没有按下发送键。");
+        }
+        if (!_permissionEnabled(PermissionKeys.Keyboard))
+        {
+            return ToolExecutionResult.Fail("键盘授权已撤回，消息内容已输入但没有按下发送键。");
+        }
+        var sendResult = PressHotkey("enter");
+        if (!sendResult.Success)
+        {
+            return sendResult;
+        }
+
+        _log($"已向 {app.DisplayName} 联系人 {recipient} 执行发送（{message.Length} 个字符，内容未写入日志）。");
+        return ToolExecutionResult.Ok($"已在 {app.DisplayName} 联系人“{recipient}”的会话中按下发送键。");
+    }
+
+    private async Task<ToolExecutionResult> NewNotepadDocumentAsync(
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        CancellationToken cancellationToken)
+    {
+        if (!EnsureTargetIsForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail("记事本没有保持在前台，已取消新建文档。");
+        }
+        var result = PressHotkey("ctrl+n");
+        if (!result.Success)
+        {
+            return result;
+        }
+        await Task.Delay(300, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail("记事本新建文档后失去前台，已停止后续输入。");
+        }
+        _log("已在记事本中新建文档。");
+        return ToolExecutionResult.Ok("已在记事本中新建文档。");
+    }
+
+    private async Task<ToolExecutionResult> WriteNotepadTextAsync(
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string text,
+        CancellationToken cancellationToken)
+    {
+        if (!EnsureTargetIsForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail("记事本没有保持在前台，已取消写入，避免内容进入错误窗口。");
+        }
+        await Task.Delay(180, cancellationToken);
+        if (!_permissionEnabled(PermissionKeys.Keyboard))
+        {
+            return ToolExecutionResult.Fail("键盘授权已撤回，内容未写入。");
+        }
+        var result = TypeText(text);
+        if (!result.Success)
+        {
+            return result;
+        }
+        _log($"已向记事本写入 {text.Length} 个字符（内容未写入日志）。");
+        return ToolExecutionResult.Ok($"已向记事本写入 {text.Length} 个字符。");
     }
 
     private static IntPtr FindMainWindow(IReadOnlyList<string> processNames)
     {
+        var processIds = new HashSet<uint>();
+        var candidates = new List<(IntPtr Handle, long Score)>();
         foreach (var processName in processNames)
         {
             foreach (var process in Process.GetProcessesByName(processName))
@@ -338,9 +678,14 @@ internal sealed class WindowsController
                     try
                     {
                         process.Refresh();
-                        if (process.MainWindowHandle != IntPtr.Zero)
+                        processIds.Add((uint)process.Id);
+                        if (process.MainWindowHandle != IntPtr.Zero
+                            && IsWindowVisible(process.MainWindowHandle)
+                            && GetWindowRect(process.MainWindowHandle, out var mainRect))
                         {
-                            return process.MainWindowHandle;
+                            var mainWidth = Math.Max(0, mainRect.Right - mainRect.Left);
+                            var mainHeight = Math.Max(0, mainRect.Bottom - mainRect.Top);
+                            candidates.Add((process.MainWindowHandle, 2_000_000_000L + (long)mainWidth * mainHeight));
                         }
                     }
                     catch
@@ -350,7 +695,127 @@ internal sealed class WindowsController
                 }
             }
         }
-        return IntPtr.Zero;
+
+        if (processIds.Count > 0)
+        {
+            EnumWindows((windowHandle, _) =>
+            {
+                if (!IsWindowVisible(windowHandle))
+                {
+                    return true;
+                }
+                GetWindowThreadProcessId(windowHandle, out var processId);
+                if (!processIds.Contains(processId) || !GetWindowRect(windowHandle, out var rect))
+                {
+                    return true;
+                }
+                var width = Math.Max(0, rect.Right - rect.Left);
+                var height = Math.Max(0, rect.Bottom - rect.Top);
+                if (width < 160 || height < 100)
+                {
+                    return true;
+                }
+                var titleBonus = GetWindowTextLength(windowHandle) > 0 ? 1_000_000_000L : 0;
+                candidates.Add((windowHandle, titleBonus + (long)width * height));
+                return true;
+            }, IntPtr.Zero);
+        }
+
+        return candidates
+            .OrderByDescending(candidate => candidate.Score)
+            .Select(candidate => candidate.Handle)
+            .FirstOrDefault();
+    }
+
+    private static bool EnsureTargetIsForeground(IntPtr handle, IReadOnlyList<string> processNames)
+    {
+        return IsTargetWindowForeground(handle, processNames) || TryBringWindowToFront(handle, processNames);
+    }
+
+    private static bool IsTargetWindowForeground(IntPtr handle, IReadOnlyList<string> processNames)
+    {
+        var foreground = GetForegroundWindow();
+        if (foreground == IntPtr.Zero)
+        {
+            return false;
+        }
+        if (foreground == handle)
+        {
+            return true;
+        }
+        var foregroundRoot = GetAncestor(foreground, GetAncestorRootOwner);
+        var targetRoot = GetAncestor(handle, GetAncestorRootOwner);
+        if (foregroundRoot != IntPtr.Zero && foregroundRoot == targetRoot)
+        {
+            return true;
+        }
+        GetWindowThreadProcessId(foreground, out var processId);
+        if (processId == 0)
+        {
+            return false;
+        }
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            return processNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryBringWindowToFront(IntPtr handle, IReadOnlyList<string> processNames)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (IsIconic(handle))
+        {
+            ShowWindowAsync(handle, 9);
+        }
+        else
+        {
+            ShowWindowAsync(handle, 5);
+        }
+
+        var currentThread = GetCurrentThreadId();
+        var foreground = GetForegroundWindow();
+        var foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out _);
+        var targetThread = GetWindowThreadProcessId(handle, out _);
+        var attachedForeground = false;
+        var attachedTarget = false;
+        try
+        {
+            if (foregroundThread != 0 && foregroundThread != currentThread)
+            {
+                attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+            }
+            if (targetThread != 0 && targetThread != currentThread)
+            {
+                attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+            }
+
+            BringWindowToTop(handle);
+            SetForegroundWindow(handle);
+            SetFocus(handle);
+        }
+        finally
+        {
+            if (attachedTarget)
+            {
+                AttachThreadInput(currentThread, targetThread, false);
+            }
+            if (attachedForeground)
+            {
+                AttachThreadInput(currentThread, foregroundThread, false);
+            }
+        }
+
+        Thread.Sleep(140);
+        return IsTargetWindowForeground(handle, processNames);
     }
 
     private ToolExecutionResult DiagnoseApps()
@@ -366,7 +831,14 @@ internal sealed class WindowsController
             var path = Path.Combine(
                 _settingsStore.DiagnosticsDirectory,
                 $"app-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
-            File.WriteAllText(path, InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+            var report = string.Join(
+                Environment.NewLine,
+                $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
+                $"键盘输入结构：{Marshal.SizeOf<Input>()} 字节（预期 {(IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86)} 字节）",
+                $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
+                string.Empty,
+                InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+            File.WriteAllText(path, report);
             _log($"应用诊断报告已导出：{path}");
             return ToolExecutionResult.Ok($"诊断报告已保存到：{path}");
         }
@@ -399,13 +871,14 @@ internal sealed class WindowsController
         var url = engine.Trim().ToLowerInvariant() switch
         {
             "bing" => $"https://www.bing.com/search?q={encodedQuery}",
+            "google" => $"https://www.google.com/search?q={encodedQuery}",
             _ => $"https://www.baidu.com/s?wd={encodedQuery}"
         };
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-        return ToolExecutionResult.Ok($"已搜索：{query.Trim()}");
+        return ToolExecutionResult.Ok($"已把“{query.Trim()}”交给默认浏览器搜索。");
     }
 
-    private static ToolExecutionResult TypeText(string text)
+    private ToolExecutionResult TypeText(string text)
     {
         if (text.Length == 0)
         {
@@ -417,24 +890,56 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("单次输入不能超过 4000 个字符。");
         }
 
-        foreach (var character in text)
+        var pendingInputs = new List<Input>(128);
+        for (var index = 0; index < text.Length; index++)
         {
-            var inputs = new[]
+            var character = text[index];
+            if (character is '\r' or '\n')
             {
-                CreateUnicodeInput(character, false),
-                CreateUnicodeInput(character, true)
-            };
-            var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
-            if (sent != (uint)inputs.Length)
+                if (character == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
+                {
+                    index++;
+                }
+                pendingInputs.Add(CreateVirtualKeyInput(0x0D, false));
+                pendingInputs.Add(CreateVirtualKeyInput(0x0D, true));
+            }
+            else
             {
-                return ToolExecutionResult.Fail("键盘输入被系统或高权限窗口阻止。");
+                pendingInputs.Add(CreateUnicodeInput(character, false));
+                pendingInputs.Add(CreateUnicodeInput(character, true));
+            }
+
+            if (pendingInputs.Count >= 120)
+            {
+                var batchResult = SendKeyboardInputs(pendingInputs, "文字输入");
+                if (!batchResult.Success)
+                {
+                    return batchResult;
+                }
+                pendingInputs.Clear();
+            }
+        }
+
+        if (pendingInputs.Count > 0)
+        {
+            var batchResult = SendKeyboardInputs(pendingInputs, "文字输入");
+            if (!batchResult.Success)
+            {
+                return batchResult;
             }
         }
 
         return ToolExecutionResult.Ok($"已输入 {text.Length} 个字符。");
     }
 
-    private static ToolExecutionResult PressHotkey(string keys)
+    private static ToolExecutionResult GetCursorPosition()
+    {
+        return GetCursorPos(out var point)
+            ? ToolExecutionResult.Ok($"当前鼠标位置：x={point.X}, y={point.Y}。")
+            : ToolExecutionResult.Fail("Windows 未能返回当前鼠标位置。");
+    }
+
+    private ToolExecutionResult PressHotkey(string keys)
     {
         var parts = keys
             .Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -455,16 +960,49 @@ internal sealed class WindowsController
             virtualKeys.Add(virtualKey);
         }
 
+        var inputs = new List<Input>(virtualKeys.Count * 2);
         foreach (var virtualKey in virtualKeys)
         {
-            keybd_event(virtualKey, 0, 0, UIntPtr.Zero);
+            inputs.Add(CreateVirtualKeyInput(virtualKey, false));
         }
         for (var index = virtualKeys.Count - 1; index >= 0; index--)
         {
-            keybd_event(virtualKeys[index], 0, KeyEventKeyUp, UIntPtr.Zero);
+            inputs.Add(CreateVirtualKeyInput(virtualKeys[index], true));
         }
 
-        return ToolExecutionResult.Ok($"已按下快捷键：{string.Join('+', parts)}");
+        var result = SendKeyboardInputs(inputs, $"快捷键 {string.Join('+', parts)}");
+        return result.Success
+            ? ToolExecutionResult.Ok($"已按下快捷键：{string.Join('+', parts)}")
+            : result;
+    }
+
+    private ToolExecutionResult SendKeyboardInputs(IReadOnlyCollection<Input> inputs, string operation)
+    {
+        var inputSize = Marshal.SizeOf<Input>();
+        var expectedInputSize = IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86;
+        if (!IsNativeInputLayoutValid)
+        {
+            _log($"键盘输入组件尺寸异常：实际 {inputSize}，预期 {expectedInputSize}。");
+            return ToolExecutionResult.Fail("键盘输入组件异常，请安装最新版路遥智控后重试。");
+        }
+
+        var inputArray = inputs as Input[] ?? inputs.ToArray();
+        Marshal.SetLastPInvokeError(0);
+        var sent = SendInput((uint)inputArray.Length, inputArray, inputSize);
+        if (sent == (uint)inputArray.Length)
+        {
+            return ToolExecutionResult.Ok($"已完成{operation}。");
+        }
+
+        var errorCode = Marshal.GetLastWin32Error();
+        _log(
+            $"Windows 拒绝键盘输入：{operation}，已发送 {sent}/{inputArray.Length}，"
+            + $"错误码 {errorCode}，输入尺寸 {inputSize}，管理员模式 {WindowsInputAccess.IsElevated}。");
+        return WindowsInputAccess.IsElevated
+            ? ToolExecutionResult.Fail(
+                $"Windows 或目标应用阻止了{operation}（错误码 {errorCode}）。UAC、安全软件和受保护窗口无法自动操作。")
+            : ToolExecutionResult.Fail(
+                $"目标窗口阻止了{operation}（错误码 {errorCode}）。如果目标应用以管理员身份运行，请在路遥智控“授权管理”中点击“管理员模式重启”。");
     }
 
     private static ToolExecutionResult MoveMouse(int x, int y)
@@ -656,6 +1194,22 @@ internal sealed class WindowsController
         }
     };
 
+    private static Input CreateVirtualKeyInput(byte virtualKey, bool keyUp) => new()
+    {
+        Type = InputKeyboard,
+        Data = new InputUnion
+        {
+            Keyboard = new KeyboardInput
+            {
+                VirtualKey = virtualKey,
+                ScanCode = 0,
+                Flags = keyUp ? KeyEventKeyUp : 0,
+                Time = 0,
+                ExtraInfo = IntPtr.Zero
+            }
+        }
+    };
+
     private static bool TryResolveVirtualKey(string key, out byte virtualKey)
     {
         var namedKeys = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase)
@@ -715,6 +1269,15 @@ internal sealed class WindowsController
     {
         [FieldOffset(0)]
         public KeyboardInput Keyboard;
+
+        // INPUT is a native union. Including its largest member is required so
+        // Marshal.SizeOf<Input>() is 40 bytes on x64 (28 on x86). A keyboard-only
+        // union is too small and makes SendInput fail with ERROR_INVALID_PARAMETER.
+        [FieldOffset(0)]
+        public MouseInput Mouse;
+
+        [FieldOffset(0)]
+        public HardwareInput Hardware;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -726,6 +1289,43 @@ internal sealed class WindowsController
         public uint Time;
         public IntPtr ExtraInfo;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+        public int X;
+        public int Y;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public IntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HardwareInput
+    {
+        public uint Message;
+        public ushort ParameterLow;
+        public ushort ParameterHigh;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr windowHandle, IntPtr parameter);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputCount, Input[] inputs, int size);
@@ -742,7 +1342,49 @@ internal sealed class WindowsController
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out CursorPoint point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr windowHandle, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BringWindowToTop(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowTextLength(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr windowHandle, out WindowRect rect);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -750,5 +1392,5 @@ internal sealed class WindowsController
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ShowWindow(IntPtr windowHandle, int command);
+    private static extern bool ShowWindowAsync(IntPtr windowHandle, int command);
 }
