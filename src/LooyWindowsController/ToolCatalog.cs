@@ -96,6 +96,19 @@ internal static class ToolCatalog
             Properties(
                 RequiredInteger("amount", "滚动格数。", -20, 20))));
 
+        tools.Add(Tool(
+            "windows.inspect_screen",
+            "在本机截取并 OCR 识别当前前台窗口，返回带编号的可见文字和短期快照 ID；截图只在内存中处理，不保存到磁盘，但识别出的文字会返回给当前连接的路遥。网页或网易云搜索完成后，必须先调用本工具读取结果，禁止猜测坐标。未授权时会在电脑上弹窗询问。",
+            Properties(
+                OptionalInteger("max_items", "最多返回的可见文字条目，默认 60。", 10, 80))));
+        tools.Add(Tool(
+            "windows.click_screen_item",
+            "点击 windows.inspect_screen 返回的某个文字编号。调用前必须使用同一快照 ID，选择标题等唯一文字，不能把用户说的“第几个结果”直接当成本参数。抖音视频标题通常单击（clicks=1），网易云歌曲标题通常双击（clicks=2）。点击前会重新识别并核对文字、窗口与位置；页面变化时会拒绝点击。",
+            Properties(
+                Required("snapshot_id", "string", "windows.inspect_screen 返回的 8 位快照 ID。"),
+                RequiredInteger("index", "该快照列表中方括号里的文字编号。", 1, 80),
+                OptionalInteger("clicks", "左键点击次数；视频使用 1，音乐使用 2，默认 1。", 1, 2))));
+
         if (permissionEnabled(PermissionKeys.Media))
         {
             tools.Add(Tool(
