@@ -1358,7 +1358,7 @@ internal sealed class WindowsController
             return await WriteNotepadTextAsync(handle, processNames, text, cancellationToken);
         }
 
-        var mediaResult = MediaControl(normalizedAction, 1);
+        var mediaResult = MediaControl(normalizedAction, 1, -1);
         if (mediaResult.Success)
         {
             _log($"已对 {app.DisplayName} 执行：{normalizedAction}");

@@ -13,6 +13,7 @@ internal static class WindowsSystemTools
     private const uint WmSettingChange = 0x001A;
     private const uint SmtoAbortIfHung = 0x0002;
     private const int ClsContextAll = 23;
+    private static readonly Guid MMDeviceEnumeratorClassId = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
     private static readonly IntPtr HwndBroadcast = new(0xFFFF);
     private static readonly string[] WallpaperExtensions = [".bmp", ".jpg", ".jpeg", ".png"];
 
@@ -68,7 +69,10 @@ internal static class WindowsSystemTools
         object? endpointObject = null;
         try
         {
-            var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+            var enumeratorType = Type.GetTypeFromCLSID(MMDeviceEnumeratorClassId, throwOnError: true)
+                                 ?? throw new InvalidOperationException("Windows 音频设备服务不可用。");
+            var enumerator = (IMMDeviceEnumerator)(Activator.CreateInstance(enumeratorType)
+                             ?? throw new InvalidOperationException("无法创建 Windows 音频设备枚举器。"));
             try
             {
                 ThrowIfFailed(enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Multimedia, out device));
@@ -461,12 +465,6 @@ internal static class WindowsSystemTools
         Console,
         Multimedia,
         Communications
-    }
-
-    [ComImport]
-    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    private sealed class MMDeviceEnumeratorComObject
-    {
     }
 
     [ComImport]
