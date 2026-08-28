@@ -49,6 +49,12 @@ internal static class Program
             Environment.ExitCode = ScreenAutomationHeuristics.RunComponentSelfTest() ? 0 : 87;
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-safe-system-tools", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = WindowsSystemTools.RunComponentSelfTest() ? 0 : 87;
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

@@ -55,12 +55,12 @@ internal sealed class MainForm : Form
         ApplySettingsToUi();
         WireEvents();
         _initializing = false;
-        WriteLog("路遥智控 0.5.2 已启动。连接密钥不会显示在运行记录中。");
+        WriteLog("路遥智控 0.6.0 已启动。连接密钥不会显示在运行记录中。");
     }
 
     private void BuildWindow()
     {
-        Text = "路遥智控 · LOOY v0.5.2";
+        Text = "路遥智控 · LOOY v0.6.0";
         Width = 1040;
         Height = 760;
         MinimumSize = new Size(900, 680);
@@ -333,6 +333,8 @@ internal sealed class MainForm : Form
         AddPermission(permissionPanel, PermissionKeys.Applications, "打开和关闭可用应用", "只能操作“应用管理”中已启用的应用。", true);
         AddPermission(permissionPanel, PermissionKeys.Web, "打开网页和搜索", "只允许 http/https 地址，不允许打开本地文件。", true);
         AddPermission(permissionPanel, PermissionKeys.Media, "音量与媒体控制", "调节音量、静音、播放暂停和切歌。", true);
+        AddPermission(permissionPanel, PermissionKeys.SystemControl, "系统设置与电源操作", "主题、壁纸和经二次确认的锁定/关机/重启；默认关闭。", false);
+        AddPermission(permissionPanel, PermissionKeys.Clipboard, "读取剪贴板文字", "剪贴板可能包含密码或隐私；只有明确要求时才开启。", false);
         AddPermission(permissionPanel, PermissionKeys.Keyboard, "键盘输入和快捷键", "能够向当前窗口输入文字并发送快捷键。", false);
         AddPermission(permissionPanel, PermissionKeys.Mouse, "鼠标移动、点击和滚动", "能够操作当前桌面，请谨慎开启。", false);
         AddPermission(permissionPanel, PermissionKeys.ScreenRecognition, "识别前台窗口文字", "截图只在本机内存中识别且不保存；识别出的文字会返回给当前连接的路遥。", false);

@@ -12,6 +12,18 @@ internal static class ToolCatalog
                 "windows.system_status",
                 "读取当前 Windows 电脑的名称、系统版本、当前时间和运行状态。只读操作。",
                 Properties()));
+            tools.Add(Tool(
+                "windows.resource_status",
+                "读取当前 CPU、内存、磁盘和网络瞬时使用情况。只读操作，不会扫描文件内容。",
+                Properties()));
+        }
+
+        if (permissionEnabled(PermissionKeys.Clipboard))
+        {
+            tools.Add(Tool(
+                "windows.read_clipboard_text",
+                "读取本机剪贴板中的纯文字并返回给当前连接的路遥，最多 4000 个字符。剪贴板可能含有密码或隐私，仅在用户明确要求读取时调用。",
+                Properties()));
         }
 
         if (permissionEnabled(PermissionKeys.Applications))
@@ -96,6 +108,20 @@ internal static class ToolCatalog
             "适配当前前台应用或网页的可见搜索框。程序会先识别并聚焦输入框，再输入搜索词并用屏幕 OCR 核对；核对无误后，若屏幕存在唯一独立的“搜索/查找”按钮就移动光标单击，否则在已聚焦搜索框中按回车。绝不在输入搜索词之前提交。需要键盘、鼠标和屏幕文字识别授权。",
             Properties(
                 Required("query", "string", "要输入、核对并提交的单行搜索词，最长 200 个字符。"))));
+        tools.Add(Tool(
+            "windows.find_text",
+            "在当前前台文档、网页或应用中查找文字。会显示或识别查找框，先输入并 OCR 核对文字，再按画面选择唯一查找按钮或回车；不会先提交后输入。",
+            Properties(
+                Required("query", "string", "要在当前内容中查找的单行文字，最长 200 个字符。"))));
+        tools.Add(Tool(
+            "windows.show_desktop",
+            "使用 Windows 的显示桌面快捷键。只在用户明确要求显示桌面时调用，需要键盘授权。",
+            Properties()));
+        tools.Add(Tool(
+            "windows.presentation_control",
+            "控制当前前台的 PowerPoint 或 WPS 演示窗口。程序会先核对前台进程，支持上一页、下一页、结束放映、从当前页放映和从头放映；不会对其他窗口盲按快捷键。",
+            Properties(
+                RequiredEnum("action", "演示动作。", "previous", "next", "end", "start_current", "start_beginning"))));
 
         tools.Add(Tool(
             "windows.cursor_position",
@@ -145,18 +171,41 @@ internal static class ToolCatalog
         {
             tools.Add(Tool(
                 "windows.media_control",
-                "控制系统音量和媒体播放，支持增大音量、减小音量、静音、播放暂停、上一首、下一首。",
+                "控制系统音量和媒体播放，支持设置 0-100 的准确音量、增大音量、减小音量、静音、播放暂停、上一首、下一首。",
                 Properties(
                     RequiredEnum(
                         "action",
                         "媒体动作。",
                         "volume_up",
                         "volume_down",
+                        "set_volume",
                         "mute",
                         "play_pause",
                         "previous",
                         "next"),
-                    OptionalInteger("steps", "调节音量的步数，默认 2。", 1, 10))));
+                    OptionalInteger("steps", "增大或减小音量的步数，默认 2。", 1, 10),
+                    OptionalInteger("level", "set_volume 的目标音量，范围 0 到 100。", 0, 100))));
+        }
+
+        if (permissionEnabled(PermissionKeys.SystemControl))
+        {
+            tools.Add(Tool(
+                "windows.system_control",
+                "执行参数受限的 Windows 系统设置。支持切换深浅色主题、更换为本机现有图片壁纸，以及取消已经计划的关机或重启；不接受 CMD、PowerShell 或任意命令。",
+                Properties(
+                    RequiredEnum("action", "系统设置动作。", "theme_light", "theme_dark", "set_wallpaper", "cancel_power_action"),
+                    Optional("path", "string", "set_wallpaper 使用的本机图片绝对路径，只支持 BMP/JPG/JPEG/PNG，最大 50 MB。"))));
+            tools.Add(Tool(
+                "windows.prepare_power_action",
+                "只准备锁定、关机或重启操作，不会立刻执行。返回一次性 confirmation_id；不得在同一条用户请求中自动调用确认工具。新的准备会覆盖旧操作。",
+                Properties(
+                    RequiredEnum("action", "电源动作。", "lock", "shutdown", "restart"),
+                    OptionalInteger("delay_seconds", "关机或重启确认后的延迟秒数，默认 60，范围 0 到 3600；锁定忽略此参数。", 0, 3600))));
+            tools.Add(Tool(
+                "windows.confirm_power_action",
+                "执行最近准备的锁定、关机或重启。只有用户在准备完成后的后续消息中单独明确确认时才能调用；编号两分钟过期，使用前即消费，不能重复执行。",
+                Properties(
+                    Required("confirmation_id", "string", "windows.prepare_power_action 返回的最近一次确认编号。"))));
         }
 
         if (permissionEnabled(PermissionKeys.Screenshot))

@@ -33,6 +33,7 @@ internal sealed class WindowsController
     private readonly SemaphoreSlim _actionLock = new(1, 1);
     private ScreenSnapshot? _screenSnapshot;
     private PendingChatSend? _pendingChatSend;
+    private PendingPowerAction? _pendingPowerAction;
 
     private sealed record PendingChatSend(
         string ConfirmationId,
@@ -45,6 +46,12 @@ internal sealed class WindowsController
         Rectangle WindowBounds,
         Rectangle HeaderBounds,
         Rectangle MessageBounds,
+        DateTimeOffset CreatedAt);
+
+    private sealed record PendingPowerAction(
+        string ConfirmationId,
+        string Action,
+        int DelaySeconds,
         DateTimeOffset CreatedAt);
 
     private sealed record VerifiedSearchInput(
@@ -87,6 +94,7 @@ internal sealed class WindowsController
     {
         _screenSnapshot = null;
         _pendingChatSend = null;
+        _pendingPowerAction = null;
     }
 
     public WindowsController(
@@ -114,6 +122,12 @@ internal sealed class WindowsController
             return toolName switch
             {
                 "windows.system_status" => RequirePermission(PermissionKeys.SystemStatus, GetSystemStatus),
+                "windows.resource_status" => RequirePermission(
+                    PermissionKeys.SystemStatus,
+                    WindowsSystemTools.GetResourceStatus),
+                "windows.read_clipboard_text" => RequirePermission(
+                    PermissionKeys.Clipboard,
+                    WindowsSystemTools.ReadClipboardText),
                 "windows.list_apps" => RequirePermission(PermissionKeys.Applications, ListApps),
                 "windows.open_app" => RequirePermission(
                     PermissionKeys.Applications,
@@ -166,6 +180,13 @@ internal sealed class WindowsController
                 "windows.verified_screen_search" => await VerifiedScreenSearchAsync(
                     RequiredString(arguments, "query"),
                     cancellationToken),
+                "windows.find_text" => await VerifiedScreenSearchAsync(
+                    RequiredString(arguments, "query"),
+                    cancellationToken),
+                "windows.show_desktop" => await ShowDesktopAsync(cancellationToken),
+                "windows.presentation_control" => await PresentationControlAsync(
+                    RequiredString(arguments, "action"),
+                    cancellationToken),
                 "windows.type_text" => await RequireInputPermissionAsync(
                     PermissionKeys.Keyboard,
                     "向当前窗口输入文字",
@@ -213,7 +234,21 @@ internal sealed class WindowsController
                     PermissionKeys.Media,
                     () => MediaControl(
                         RequiredString(arguments, "action"),
-                        OptionalInt(arguments, "steps", 2))),
+                        OptionalInt(arguments, "steps", 2),
+                        OptionalInt(arguments, "level", -1))),
+                "windows.system_control" => RequirePermission(
+                    PermissionKeys.SystemControl,
+                    () => SystemControl(
+                        RequiredString(arguments, "action"),
+                        OptionalString(arguments, "path", string.Empty))),
+                "windows.prepare_power_action" => RequirePermission(
+                    PermissionKeys.SystemControl,
+                    () => PreparePowerAction(
+                        RequiredString(arguments, "action"),
+                        OptionalInt(arguments, "delay_seconds", 60))),
+                "windows.confirm_power_action" => RequirePermission(
+                    PermissionKeys.SystemControl,
+                    () => ConfirmPowerAction(RequiredString(arguments, "confirmation_id"))),
                 "windows.screenshot" => RequirePermission(PermissionKeys.Screenshot, TakeScreenshot),
                 _ => ToolExecutionResult.Fail($"未知工具：{toolName}")
             };
@@ -277,6 +312,148 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail($"用户没有授权“{reason}”，本次操作已取消。");
         }
         return null;
+    }
+
+    private Task<ToolExecutionResult> ShowDesktopAsync(CancellationToken cancellationToken)
+    {
+        return RequireInputPermissionAsync(
+            PermissionKeys.Keyboard,
+            "使用 Windows 快捷键显示桌面",
+            () => PressHotkey("win+d"),
+            cancellationToken);
+    }
+
+    private async Task<ToolExecutionResult> PresentationControlAsync(
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var normalizedAction = action.Trim().ToLowerInvariant();
+        var hotkey = normalizedAction switch
+        {
+            "previous" => "left",
+            "next" => "right",
+            "end" => "esc",
+            "start_current" => "shift+f5",
+            "start_beginning" => "f5",
+            _ => string.Empty
+        };
+        if (hotkey.Length == 0)
+        {
+            return ToolExecutionResult.Fail("演示动作只支持 previous、next、end、start_current 或 start_beginning。");
+        }
+
+        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
+        {
+            return ToolExecutionResult.Fail("没有找到可控制的前台演示窗口。");
+        }
+        var processName = ScreenRecognitionService.GetProcessName(targetHandle);
+        if (!IsPresentationProcess(processName))
+        {
+            return ToolExecutionResult.Fail(
+                $"当前前台程序“{(string.IsNullOrWhiteSpace(processName) ? "未知" : processName)}”不是已识别的 PowerPoint/WPS 演示窗口，已停止发送快捷键。");
+        }
+
+        var denied = await EnsureAutomationPermissionAsync(
+            PermissionKeys.Keyboard,
+            $"控制前台演示：{normalizedAction}",
+            cancellationToken);
+        if (denied is { } failure)
+        {
+            return failure;
+        }
+
+        var processNames = new[] { processName };
+        if (!EnsureExactTargetIsForeground(targetHandle, processNames))
+        {
+            return ToolExecutionResult.Fail("授权窗口关闭后无法安全恢复原演示窗口，请手动切回后重试。");
+        }
+        var result = PressHotkey(hotkey);
+        return result.Success
+            ? ToolExecutionResult.Ok($"已在 {processName} 执行演示动作：{normalizedAction}。")
+            : result;
+    }
+
+    private static bool IsPresentationProcess(string processName)
+    {
+        return processName.Equals("powerpnt", StringComparison.OrdinalIgnoreCase)
+               || processName.Equals("wpp", StringComparison.OrdinalIgnoreCase)
+               || processName.Equals("wps", StringComparison.OrdinalIgnoreCase)
+               || processName.Equals("presentationhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private ToolExecutionResult SystemControl(string action, string path)
+    {
+        return action.Trim().ToLowerInvariant() switch
+        {
+            "theme_light" => WindowsSystemTools.SetTheme(dark: false),
+            "theme_dark" => WindowsSystemTools.SetTheme(dark: true),
+            "set_wallpaper" when !string.IsNullOrWhiteSpace(path) => WindowsSystemTools.SetWallpaper(path),
+            "set_wallpaper" => ToolExecutionResult.Fail("更换壁纸必须提供本机图片的绝对路径。"),
+            "cancel_power_action" => WindowsSystemTools.CancelPendingPowerAction(),
+            _ => ToolExecutionResult.Fail(
+                "系统设置动作只支持 theme_light、theme_dark、set_wallpaper 或 cancel_power_action。")
+        };
+    }
+
+    private ToolExecutionResult PreparePowerAction(string action, int delaySeconds)
+    {
+        var normalizedAction = action.Trim().ToLowerInvariant();
+        if (normalizedAction is not "lock" and not "shutdown" and not "restart")
+        {
+            return ToolExecutionResult.Fail("电源动作只支持 lock、shutdown 或 restart。");
+        }
+        if (delaySeconds is < 0 or > 3600)
+        {
+            return ToolExecutionResult.Fail("延迟时间必须是 0 到 3600 秒。");
+        }
+        if (normalizedAction == "lock")
+        {
+            delaySeconds = 0;
+        }
+
+        var confirmationId = Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        _pendingPowerAction = new PendingPowerAction(
+            confirmationId,
+            normalizedAction,
+            delaySeconds,
+            DateTimeOffset.Now);
+        var description = normalizedAction switch
+        {
+            "lock" => "锁定电脑",
+            "shutdown" => $"在 {delaySeconds} 秒后关机",
+            _ => $"在 {delaySeconds} 秒后重启"
+        };
+        _log($"已准备系统电源操作：{description}；尚未执行，确认编号 {confirmationId}。");
+        return ToolExecutionResult.Ok(
+            $"已准备“{description}”，尚未执行。确认编号：{confirmationId}。请向用户复述该操作；只有用户在后续消息中单独明确确认后，才能调用 windows.confirm_power_action。编号两分钟有效。");
+    }
+
+    private ToolExecutionResult ConfirmPowerAction(string confirmationId)
+    {
+        var pending = _pendingPowerAction;
+        if (pending is null)
+        {
+            return ToolExecutionResult.Fail("当前没有待确认的电源操作。请先调用 windows.prepare_power_action。");
+        }
+        if (!pending.ConfirmationId.Equals(confirmationId.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return ToolExecutionResult.Fail("确认编号不匹配，电源操作没有执行。");
+        }
+        if (DateTimeOffset.Now - pending.CreatedAt > TimeSpan.FromMinutes(2))
+        {
+            _pendingPowerAction = null;
+            return ToolExecutionResult.Fail("确认编号已超过两分钟并失效，请重新准备电源操作。");
+        }
+
+        // Consume before the operating-system call so retries cannot repeat a
+        // lock, shutdown, or restart after an ambiguous transport failure.
+        _pendingPowerAction = null;
+        var result = WindowsSystemTools.ExecutePowerAction(pending.Action, pending.DelaySeconds);
+        _log(result.Success
+            ? $"已执行用户二次确认的电源操作：{pending.Action}。"
+            : $"电源操作执行失败：{result.Message}");
+        return result;
     }
 
     private async Task<ToolExecutionResult> VerifiedScreenSearchAsync(
@@ -2104,7 +2281,7 @@ internal sealed class WindowsController
             : result;
     }
 
-    private ToolExecutionResult MediaControl(string action, int steps)
+    private ToolExecutionResult MediaControl(string action, int steps, int level)
     {
         const byte volumeUp = 0xAF;
         const byte volumeDown = 0xAE;
@@ -2114,6 +2291,10 @@ internal sealed class WindowsController
         const byte mediaNext = 0xB0;
 
         var normalizedAction = action.Trim().ToLowerInvariant();
+        if (normalizedAction == "set_volume")
+        {
+            return WindowsSystemTools.SetMasterVolume(level);
+        }
         var virtualKey = normalizedAction switch
         {
             "volume_up" => volumeUp,

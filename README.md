@@ -6,11 +6,11 @@
 
 每次 GitHub Actions 构建会生成两个文件：
 
-- `LooyWindowsController-Setup-0.5.2.exe`：Windows 安装程序。
+- `LooyWindowsController-Setup-0.6.0.exe`：Windows 安装程序。
 - `LooyWindowsController-win-x64.zip`：免安装便携版。
 
 安装后打开“路遥智控”，粘贴自己的 MCP 接入点，选择允许的权限和应用，然后点击“连接路遥”。
 
-0.5.2 在网易云连续任务和按屏幕文字打开功能之上，统一改为先输入并 OCR 核对搜索词，再按画面决定点击搜索按钮或回车。QQ 与微信消息采用准备、确认两步流程：换人必定重新搜索并核对联系人，只填入不发送；用户后续明确确认后再次核对并只发送一次。
+0.6.0 在保留网易云、通用识屏搜索和 QQ/微信二次确认发送的基础上，吸收公开 [xiaozhi-MCPTools](https://github.com/ZongZiTongXue/xiaozhi-MCPTools) 的可解释控制思路，新增资源监控、剪贴板文字读取、显示桌面、文档查找、PPT/WPS 演示控制、准确音量、主题/壁纸设置，以及二次确认的锁定/关机/重启。没有引入任意 CMD、任意文件写入、自动加入杀毒白名单或固定 Tab 次数盲点等高风险实现。
 
 详细说明请查看 [README_CN.md](README_CN.md)，安全边界请查看 [SECURITY.md](SECURITY.md)。

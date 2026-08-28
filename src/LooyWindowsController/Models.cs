@@ -11,6 +11,8 @@ internal static class PermissionKeys
     public const string Keyboard = "keyboard";
     public const string Mouse = "mouse";
     public const string Media = "media";
+    public const string SystemControl = "system_control";
+    public const string Clipboard = "clipboard";
     public const string ScreenRecognition = "screen_recognition";
     public const string Screenshot = "screenshot";
 
@@ -22,6 +24,8 @@ internal static class PermissionKeys
         [Keyboard] = false,
         [Mouse] = false,
         [Media] = true,
+        [SystemControl] = false,
+        [Clipboard] = false,
         [ScreenRecognition] = false,
         [Screenshot] = false
     };
