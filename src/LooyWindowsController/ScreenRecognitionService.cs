@@ -176,7 +176,7 @@ internal static class ScreenRecognitionService
         return closest.Distance <= (long)allowedDistance * allowedDistance ? closest.Item : null;
     }
 
-    internal static async Task<bool> RunComponentSelfTestAsync()
+    internal static async Task<string> RunComponentSelfTestAsync()
     {
         using var bitmap = new Bitmap(1000, 260, PixelFormat.Format32bppArgb);
         using (var graphics = Graphics.FromImage(bitmap))
@@ -192,8 +192,15 @@ internal static class ScreenRecognitionService
             bitmap.Size,
             20,
             CancellationToken.None);
-        return recognized.Items.Any(item =>
-            NormalizeText(item.Text).Contains("LOOY", StringComparison.OrdinalIgnoreCase));
+        var text = string.Join(" | ", recognized.Items.Select(item => item.Text));
+        if (!recognized.Items.Any(item =>
+                NormalizeText(item.Text).Contains("LOOY", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"OCR 已运行但没有识别出测试文字。语言：{recognized.Language}；结果：{text}");
+        }
+
+        return $"Windows OCR 自检通过。语言：{recognized.Language}；结果：{text}";
     }
 
     private static Bitmap Capture(Rectangle bounds)
