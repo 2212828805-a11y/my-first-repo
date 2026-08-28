@@ -86,13 +86,20 @@ internal sealed class McpEndpointClient : IAsyncDisposable
             return;
         }
 
-        await SendJsonAsync(
-            new Dictionary<string, object?>
-            {
-                ["jsonrpc"] = "2.0",
-                ["method"] = "notifications/tools/list_changed"
-            },
-            CancellationToken.None);
+        try
+        {
+            await SendJsonAsync(
+                new Dictionary<string, object?>
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["method"] = "notifications/tools/list_changed"
+                },
+                CancellationToken.None);
+        }
+        catch (Exception exception) when (exception is WebSocketException or ObjectDisposedException)
+        {
+            LogMessage("授权已保存；当前连接正在切换，重连后会自动同步工具列表。");
+        }
     }
 
     private async Task RunReconnectLoopAsync(Uri endpoint, CancellationToken cancellationToken)
@@ -232,7 +239,7 @@ internal sealed class McpEndpointClient : IAsyncDisposable
                                 ["serverInfo"] = new Dictionary<string, object?>
                                 {
                                     ["name"] = "LOOY Windows Controller",
-                                    ["version"] = "0.3.2"
+                                    ["version"] = "0.4.1"
                                 }
                             },
                             cancellationToken);

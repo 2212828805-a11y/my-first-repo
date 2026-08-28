@@ -11,6 +11,12 @@ internal static class Program
             Environment.ExitCode = WindowsController.IsNativeInputLayoutValid ? 0 : 87;
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-native-input", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = WindowsController.IsNativeInputEngineValid ? 0 : 87;
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

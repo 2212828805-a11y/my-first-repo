@@ -29,6 +29,7 @@ internal sealed class MainForm : Form
     private readonly Label _inputAccessStateLabel = new() { AutoSize = true };
     private readonly Label _systemInputAccessLabel = new() { AutoSize = true };
     private readonly Button _elevateButton = new() { Text = "管理员模式重启", Width = 148, Height = 36 };
+    private readonly Button _inputTestButton = new() { Text = "检测键盘与鼠标", Width = 148, Height = 36 };
     private bool _initializing = true;
     private bool _emergencyStopped;
     private bool _closingAfterStop;
@@ -54,12 +55,12 @@ internal sealed class MainForm : Form
         ApplySettingsToUi();
         WireEvents();
         _initializing = false;
-        WriteLog("路遥智控已启动。连接密钥不会显示在运行记录中。");
+        WriteLog("路遥智控 0.4.1 已启动。连接密钥不会显示在运行记录中。");
     }
 
     private void BuildWindow()
     {
-        Text = "路遥智控 · LOOY";
+        Text = "路遥智控 · LOOY v0.4.1";
         Width = 1040;
         Height = 760;
         MinimumSize = new Size(900, 680);
@@ -144,6 +145,7 @@ internal sealed class MainForm : Form
         AppTheme.StyleButton(_emergencyButton, ButtonKind.Danger);
         AppTheme.StyleButton(_inputAccessButton, ButtonKind.Primary);
         AppTheme.StyleButton(_elevateButton);
+        AppTheme.StyleButton(_inputTestButton);
         AppTheme.StyleTextBox(_endpointBox);
     }
 
@@ -265,7 +267,7 @@ internal sealed class MainForm : Form
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 158));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         layout.Controls.Add(AppTheme.SectionTitle("决定路遥可以做什么"), 0, 0);
@@ -314,6 +316,7 @@ internal sealed class MainForm : Form
         };
         inputButtons.Controls.Add(_inputAccessButton);
         inputButtons.Controls.Add(_elevateButton);
+        inputButtons.Controls.Add(_inputTestButton);
         inputAccessPanel.Controls.Add(inputButtons, 1, 0);
         layout.Controls.Add(inputAccessPanel, 0, 2);
 
@@ -561,6 +564,7 @@ internal sealed class MainForm : Form
         };
         _inputAccessButton.Click += InputAccessButton_Click;
         _elevateButton.Click += ElevateButton_Click;
+        _inputTestButton.Click += InputTestButton_Click;
         Shown += MainForm_Shown;
         FormClosing += MainForm_FormClosing;
     }
@@ -594,6 +598,27 @@ internal sealed class MainForm : Form
         {
             await _mcpClient.NotifyToolsChangedAsync();
         }
+    }
+
+    private async void InputTestButton_Click(object? sender, EventArgs eventArgs)
+    {
+        if (!IsPermissionEnabled(PermissionKeys.Keyboard)
+            || !IsPermissionEnabled(PermissionKeys.Mouse))
+        {
+            var approved = ShowInputAuthorizationDialog(
+                null,
+                "在路遥智控窗口内检测键盘输入、鼠标移动和单击");
+            if (!approved
+                || !IsPermissionEnabled(PermissionKeys.Keyboard)
+                || !IsPermissionEnabled(PermissionKeys.Mouse))
+            {
+                return;
+            }
+            await _mcpClient.NotifyToolsChangedAsync();
+        }
+
+        using var dialog = new InputSelfTestForm(_windowsController);
+        dialog.ShowDialog(this);
     }
 
     private async void ElevateButton_Click(object? sender, EventArgs eventArgs)

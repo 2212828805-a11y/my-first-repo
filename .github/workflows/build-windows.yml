@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - main
+      - fix/input-control-v0.4.1
     tags:
       - "v*"
 
@@ -45,12 +46,12 @@ jobs:
           Copy-Item README_CN.md dist/win-x64/使用说明.md
           Compress-Archive -Path dist/win-x64/* -DestinationPath dist/LooyWindowsController-win-x64.zip
 
-      - name: Verify Windows keyboard input layout
+      - name: Verify Windows native input engine
         shell: pwsh
         run: |
           $process = Start-Process `
             -FilePath "dist/win-x64/LooyWindowsController.exe" `
-            -ArgumentList "--self-test-input-layout" `
+            -ArgumentList "--self-test-native-input" `
             -Wait `
             -PassThru
           if ($process.ExitCode -ne 0) {
@@ -76,8 +77,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.3.2
+          name: LooyWindowsController-Windows-v0.4.1
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.3.2.exe
+            dist/installer/LooyWindowsController-Setup-0.4.1.exe
           if-no-files-found: error

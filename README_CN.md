@@ -65,7 +65,7 @@
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.3.2.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.4.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -103,9 +103,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.3.2` 的标签。
+- 推送形如 `v0.4.1` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.3.2` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.4.1` artifact 即可。
 
 ## 默认应用列表
 
@@ -115,7 +115,7 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 
 微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，QQ 兼容新版 QQNT 常见安装目录；两者均支持激活、搜索联系人和发送消息。网易云音乐优先直接启动真实程序，避免自定义协议确认页，并支持搜索、播放/暂停、上一首和下一首。首次需要键盘或鼠标时，电脑会弹出授权窗口，可选择“仅本次连接”或“始终允许”。
 
-0.3.2 已修复 64 位 Windows 下键盘输入组件尺寸错误导致的“被系统阻止”问题。授权管理页会分别显示“路遥授权”和“系统输入层级”：普通输入模式可操作普通应用；如果目标应用本身以管理员身份运行，可点击“管理员模式重启”，并在 Windows 弹窗中由本人确认。管理员模式也不能自动操作 UAC 安全桌面、安全软件的受保护窗口或部分游戏。
+0.4.1 已包含 0.3.2 的 64 位键盘输入结构修复，并将鼠标移动、点击和滚动统一到可校验的 Windows 输入接口，避免“程序说成功但鼠标没动”。授权管理页新增“检测键盘与鼠标”，会只在路遥智控自己的检测窗口中真实输入测试文字并点击测试区域。普通输入模式可操作普通应用；如果目标应用本身以管理员身份运行，可点击“管理员模式重启”，并在 Windows 弹窗中由本人确认。管理员模式也不能自动操作 UAC 安全桌面、安全软件的受保护窗口或部分游戏。
 
 应用配置和加密后的 MCP 地址保存在：
 

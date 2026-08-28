@@ -9,6 +9,7 @@ internal sealed class WindowsController
 {
     private const uint KeyEventKeyUp = 0x0002;
     private const uint KeyEventUnicode = 0x0004;
+    private const uint MouseEventMove = 0x0001;
     private const uint MouseEventLeftDown = 0x0002;
     private const uint MouseEventLeftUp = 0x0004;
     private const uint MouseEventRightDown = 0x0008;
@@ -16,6 +17,9 @@ internal sealed class WindowsController
     private const uint MouseEventMiddleDown = 0x0020;
     private const uint MouseEventMiddleUp = 0x0040;
     private const uint MouseEventWheel = 0x0800;
+    private const uint MouseEventVirtualDesk = 0x4000;
+    private const uint MouseEventAbsolute = 0x8000;
+    private const uint InputMouse = 0;
     private const uint InputKeyboard = 1;
     private const int ExpectedInputSizeX86 = 28;
     private const int ExpectedInputSizeX64 = 40;
@@ -30,6 +34,34 @@ internal sealed class WindowsController
 
     internal static bool IsNativeInputLayoutValid =>
         Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
+
+    internal static bool IsNativeInputEngineValid
+    {
+        get
+        {
+            var keyboard = CreateUnicodeInput('路', false);
+            var hotkey = CreateVirtualKeyInput(0x41, true);
+            var mouse = CreateMouseInput(MouseEventLeftDown, 12, 34, 56);
+            return IsNativeInputLayoutValid
+                   && keyboard.Type == InputKeyboard
+                   && keyboard.Data.Keyboard.ScanCode == '路'
+                   && keyboard.Data.Keyboard.Flags == KeyEventUnicode
+                   && hotkey.Type == InputKeyboard
+                   && hotkey.Data.Keyboard.VirtualKey == 0x41
+                   && (hotkey.Data.Keyboard.Flags & KeyEventKeyUp) != 0
+                   && mouse.Type == InputMouse
+                   && mouse.Data.Mouse.X == 12
+                   && mouse.Data.Mouse.Y == 34
+                   && mouse.Data.Mouse.MouseData == 56
+                   && mouse.Data.Mouse.Flags == MouseEventLeftDown;
+        }
+    }
+
+    internal ToolExecutionResult TypeTextForSelfTest(string text) => TypeText(text);
+
+    internal ToolExecutionResult MoveMouseForSelfTest(int x, int y) => MoveMouse(x, y);
+
+    internal ToolExecutionResult ClickLeftForSelfTest() => SendMouseButton("left", 1);
 
     public WindowsController(
         Func<string, bool> permissionEnabled,
@@ -174,7 +206,7 @@ internal sealed class WindowsController
             $"系统：{Environment.OSVersion}",
             $"64 位系统：{Environment.Is64BitOperatingSystem}",
             $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
-            $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
+            $"键鼠输入组件：{(IsNativeInputEngineValid ? "正常" : "异常")}",
             $"当前时间：{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}",
             "控制器状态：在线");
         return ToolExecutionResult.Ok(message);
@@ -207,6 +239,19 @@ internal sealed class WindowsController
         }
 
         var target = InstalledAppResolver.ResolveForLaunch(app);
+        var processNames = InstalledAppResolver.GetProcessNames(app, target);
+        var existingWindow = FindMainWindow(processNames);
+        if (existingWindow != IntPtr.Zero)
+        {
+            var activated = TryBringWindowToFront(existingWindow, processNames);
+            _log(activated
+                ? $"应用已经运行，已激活窗口：{app.DisplayName}"
+                : $"应用已经运行，但 Windows 未允许切换前台：{app.DisplayName}");
+            return activated
+                ? ToolExecutionResult.Ok($"{app.DisplayName} 已经运行，现已切换到前台。")
+                : ToolExecutionResult.Ok($"{app.DisplayName} 已经运行，但 Windows 没有允许自动切到前台；请点击一次任务栏中的应用图标。");
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = target,
@@ -310,6 +355,10 @@ internal sealed class WindowsController
             if (message.Length is < 1 or > 1000)
             {
                 return ToolExecutionResult.Fail("消息不能为空且不能超过 1000 个字符。");
+            }
+            if (recipient.IndexOfAny(['\r', '\n']) >= 0 || message.IndexOfAny(['\r', '\n']) >= 0)
+            {
+                return ToolExecutionResult.Fail("为避免聊天软件把换行误当成发送键，联系人和消息目前只支持单行文字。");
             }
         }
         else if (normalizedAction is "write_text" or "new_and_write")
@@ -651,7 +700,16 @@ internal sealed class WindowsController
         {
             return ToolExecutionResult.Fail("记事本没有保持在前台，已取消写入，避免内容进入错误窗口。");
         }
+        var escapeResult = PressHotkey("esc");
+        if (!escapeResult.Success)
+        {
+            return escapeResult;
+        }
         await Task.Delay(180, cancellationToken);
+        if (!IsTargetWindowForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail("记事本在写入前失去前台，内容未写入。");
+        }
         if (!_permissionEnabled(PermissionKeys.Keyboard))
         {
             return ToolExecutionResult.Fail("键盘授权已撤回，内容未写入。");
@@ -727,7 +785,7 @@ internal sealed class WindowsController
             .FirstOrDefault();
     }
 
-    private static bool EnsureTargetIsForeground(IntPtr handle, IReadOnlyList<string> processNames)
+    private bool EnsureTargetIsForeground(IntPtr handle, IReadOnlyList<string> processNames)
     {
         return IsTargetWindowForeground(handle, processNames) || TryBringWindowToFront(handle, processNames);
     }
@@ -765,9 +823,9 @@ internal sealed class WindowsController
         }
     }
 
-    private static bool TryBringWindowToFront(IntPtr handle, IReadOnlyList<string> processNames)
+    private bool TryBringWindowToFront(IntPtr handle, IReadOnlyList<string> processNames)
     {
-        if (handle == IntPtr.Zero)
+        if (handle == IntPtr.Zero || !IsWindow(handle))
         {
             return false;
         }
@@ -779,6 +837,15 @@ internal sealed class WindowsController
         else
         {
             ShowWindowAsync(handle, 5);
+        }
+
+        // Tool calls arrive on a WebSocket worker thread. AttachThreadInput fails
+        // when that thread has no Win32 message queue, so create the queue before
+        // trying to transfer foreground ownership.
+        PeekMessage(out _, IntPtr.Zero, 0, 0, 0);
+        if (_permissionEnabled(PermissionKeys.Keyboard))
+        {
+            PulseAltKey();
         }
 
         var currentThread = GetCurrentThreadId();
@@ -800,6 +867,7 @@ internal sealed class WindowsController
 
             BringWindowToTop(handle);
             SetForegroundWindow(handle);
+            SetActiveWindow(handle);
             SetFocus(handle);
         }
         finally
@@ -815,7 +883,33 @@ internal sealed class WindowsController
         }
 
         Thread.Sleep(140);
+        if (IsTargetWindowForeground(handle, processNames))
+        {
+            return true;
+        }
+
+        // Some Windows builds ignore the first foreground request while another
+        // application is processing activation. A second request after the input
+        // queues are detached is safe and fixes that transient race.
+        BringWindowToTop(handle);
+        SetForegroundWindow(handle);
+        Thread.Sleep(120);
         return IsTargetWindowForeground(handle, processNames);
+    }
+
+    private static void PulseAltKey()
+    {
+        if (!IsNativeInputLayoutValid)
+        {
+            return;
+        }
+
+        var inputs = new[]
+        {
+            CreateVirtualKeyInput(0x12, false),
+            CreateVirtualKeyInput(0x12, true)
+        };
+        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
     }
 
     private ToolExecutionResult DiagnoseApps()
@@ -835,7 +929,7 @@ internal sealed class WindowsController
                 Environment.NewLine,
                 $"键盘输入层级：{(WindowsInputAccess.IsElevated ? "管理员模式" : "普通模式")}",
                 $"键盘输入结构：{Marshal.SizeOf<Input>()} 字节（预期 {(IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86)} 字节）",
-                $"键盘输入组件：{(IsNativeInputLayoutValid ? "正常" : "异常")}",
+                $"键鼠输入组件：{(IsNativeInputEngineValid ? "正常" : "异常")}",
                 string.Empty,
                 InstalledAppResolver.BuildDiagnosticReport(_getApps()));
             File.WriteAllText(path, report);
@@ -978,15 +1072,28 @@ internal sealed class WindowsController
 
     private ToolExecutionResult SendKeyboardInputs(IReadOnlyCollection<Input> inputs, string operation)
     {
+        return SendNativeInputs(inputs, operation, "键盘");
+    }
+
+    private ToolExecutionResult SendNativeInputs(
+        IReadOnlyCollection<Input> inputs,
+        string operation,
+        string inputKind)
+    {
         var inputSize = Marshal.SizeOf<Input>();
         var expectedInputSize = IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86;
         if (!IsNativeInputLayoutValid)
         {
-            _log($"键盘输入组件尺寸异常：实际 {inputSize}，预期 {expectedInputSize}。");
-            return ToolExecutionResult.Fail("键盘输入组件异常，请安装最新版路遥智控后重试。");
+            _log($"{inputKind}输入组件尺寸异常：实际 {inputSize}，预期 {expectedInputSize}。");
+            return ToolExecutionResult.Fail($"{inputKind}输入组件异常，请安装最新版路遥智控后重试。");
         }
 
         var inputArray = inputs as Input[] ?? inputs.ToArray();
+        if (inputArray.Length == 0)
+        {
+            return ToolExecutionResult.Fail($"{operation}没有可发送的输入事件。");
+        }
+
         Marshal.SetLastPInvokeError(0);
         var sent = SendInput((uint)inputArray.Length, inputArray, inputSize);
         if (sent == (uint)inputArray.Length)
@@ -996,16 +1103,16 @@ internal sealed class WindowsController
 
         var errorCode = Marshal.GetLastWin32Error();
         _log(
-            $"Windows 拒绝键盘输入：{operation}，已发送 {sent}/{inputArray.Length}，"
+            $"Windows 未完成{inputKind}输入：{operation}，已发送 {sent}/{inputArray.Length}，"
             + $"错误码 {errorCode}，输入尺寸 {inputSize}，管理员模式 {WindowsInputAccess.IsElevated}。");
         return WindowsInputAccess.IsElevated
             ? ToolExecutionResult.Fail(
-                $"Windows 或目标应用阻止了{operation}（错误码 {errorCode}）。UAC、安全软件和受保护窗口无法自动操作。")
+                $"Windows 或目标应用阻止了{operation}（已发送 {sent}/{inputArray.Length}，错误码 {errorCode}）。UAC、安全软件和受保护窗口无法自动操作。")
             : ToolExecutionResult.Fail(
-                $"目标窗口阻止了{operation}（错误码 {errorCode}）。如果目标应用以管理员身份运行，请在路遥智控“授权管理”中点击“管理员模式重启”。");
+                $"目标窗口阻止了{operation}（已发送 {sent}/{inputArray.Length}，错误码 {errorCode}）。如果目标应用以管理员身份运行，请在路遥智控“授权管理”中点击“管理员模式重启”。");
     }
 
-    private static ToolExecutionResult MoveMouse(int x, int y)
+    private ToolExecutionResult MoveMouse(int x, int y)
     {
         var screen = SystemInformation.VirtualScreen;
         if (x < screen.Left || x >= screen.Right || y < screen.Top || y >= screen.Bottom)
@@ -1014,12 +1121,39 @@ internal sealed class WindowsController
                 $"坐标超出屏幕范围。当前范围：x={screen.Left}..{screen.Right - 1}, y={screen.Top}..{screen.Bottom - 1}");
         }
 
-        return SetCursorPos(x, y)
-            ? ToolExecutionResult.Ok($"鼠标已移动到 ({x}, {y})。")
-            : ToolExecutionResult.Fail("鼠标移动被系统阻止。");
+        if (screen.Width <= 1 || screen.Height <= 1)
+        {
+            return ToolExecutionResult.Fail("Windows 返回的虚拟屏幕尺寸无效，无法移动鼠标。");
+        }
+
+        var normalizedX = (int)Math.Round((x - screen.Left) * 65535d / (screen.Width - 1));
+        var normalizedY = (int)Math.Round((y - screen.Top) * 65535d / (screen.Height - 1));
+        var input = CreateMouseInput(
+            MouseEventMove | MouseEventAbsolute | MouseEventVirtualDesk,
+            normalizedX,
+            normalizedY);
+        var sendResult = SendNativeInputs([input], "鼠标移动", "鼠标");
+        if (!sendResult.Success)
+        {
+            return sendResult;
+        }
+
+        Thread.Sleep(25);
+        if (!GetCursorPos(out var actual))
+        {
+            return ToolExecutionResult.Fail("Windows 已接收鼠标移动事件，但无法读取移动后的坐标。");
+        }
+        if (Math.Abs(actual.X - x) > 2 || Math.Abs(actual.Y - y) > 2)
+        {
+            _log($"鼠标移动校验失败：目标 ({x}, {y})，实际 ({actual.X}, {actual.Y})。");
+            return ToolExecutionResult.Fail(
+                $"鼠标没有到达目标位置。目标 ({x}, {y})，实际 ({actual.X}, {actual.Y})。远程桌面、锁屏或安全软件可能阻止了输入。");
+        }
+
+        return ToolExecutionResult.Ok($"鼠标已移动到 ({actual.X}, {actual.Y})。");
     }
 
-    private static ToolExecutionResult Click(JsonElement arguments)
+    private ToolExecutionResult Click(JsonElement arguments)
     {
         var hasX = TryGetInt(arguments, "x", out var x);
         var hasY = TryGetInt(arguments, "y", out var y);
@@ -1037,8 +1171,13 @@ internal sealed class WindowsController
             }
         }
 
-        var button = OptionalString(arguments, "button", "left").ToLowerInvariant();
-        var clicks = Math.Clamp(OptionalInt(arguments, "clicks", 1), 1, 2);
+        return SendMouseButton(
+            OptionalString(arguments, "button", "left").ToLowerInvariant(),
+            Math.Clamp(OptionalInt(arguments, "clicks", 1), 1, 2));
+    }
+
+    private ToolExecutionResult SendMouseButton(string button, int clicks)
+    {
         var flags = button switch
         {
             "left" => (MouseEventLeftDown, MouseEventLeftUp),
@@ -1053,8 +1192,14 @@ internal sealed class WindowsController
 
         for (var index = 0; index < clicks; index++)
         {
-            mouse_event(flags.Item1, 0, 0, 0, UIntPtr.Zero);
-            mouse_event(flags.Item2, 0, 0, 0, UIntPtr.Zero);
+            var sendResult = SendNativeInputs(
+                [CreateMouseInput(flags.Item1), CreateMouseInput(flags.Item2)],
+                $"鼠标{button}键{(clicks == 2 ? "双击" : "单击")}",
+                "鼠标");
+            if (!sendResult.Success)
+            {
+                return sendResult;
+            }
             if (clicks == 2 && index == 0)
             {
                 Thread.Sleep(80);
@@ -1064,18 +1209,23 @@ internal sealed class WindowsController
         return ToolExecutionResult.Ok($"已{(clicks == 2 ? "双击" : "单击")}{button}键。");
     }
 
-    private static ToolExecutionResult Scroll(int amount)
+    private ToolExecutionResult Scroll(int amount)
     {
         if (amount is < -20 or > 20 || amount == 0)
         {
             return ToolExecutionResult.Fail("滚动量必须是 -20 到 20 之间的非零整数。");
         }
 
-        mouse_event(MouseEventWheel, 0, 0, unchecked((uint)(amount * 120)), UIntPtr.Zero);
-        return ToolExecutionResult.Ok($"已滚动 {amount} 格。");
+        var result = SendNativeInputs(
+            [CreateMouseInput(MouseEventWheel, mouseData: unchecked((uint)(amount * 120)))],
+            $"鼠标滚动 {amount} 格",
+            "鼠标");
+        return result.Success
+            ? ToolExecutionResult.Ok($"已滚动 {amount} 格。")
+            : result;
     }
 
-    private static ToolExecutionResult MediaControl(string action, int steps)
+    private ToolExecutionResult MediaControl(string action, int steps)
     {
         const byte volumeUp = 0xAF;
         const byte volumeDown = 0xAE;
@@ -1103,8 +1253,13 @@ internal sealed class WindowsController
         var repeat = normalizedAction is "volume_up" or "volume_down" ? Math.Clamp(steps, 1, 10) : 1;
         for (var index = 0; index < repeat; index++)
         {
-            keybd_event(virtualKey, 0, 0, UIntPtr.Zero);
-            keybd_event(virtualKey, 0, KeyEventKeyUp, UIntPtr.Zero);
+            var result = SendKeyboardInputs(
+                [CreateVirtualKeyInput(virtualKey, false), CreateVirtualKeyInput(virtualKey, true)],
+                $"媒体操作 {normalizedAction}");
+            if (!result.Success)
+            {
+                return result;
+            }
         }
 
         return ToolExecutionResult.Ok($"已执行媒体操作：{normalizedAction}。");
@@ -1204,6 +1359,27 @@ internal sealed class WindowsController
                 VirtualKey = virtualKey,
                 ScanCode = 0,
                 Flags = keyUp ? KeyEventKeyUp : 0,
+                Time = 0,
+                ExtraInfo = IntPtr.Zero
+            }
+        }
+    };
+
+    private static Input CreateMouseInput(
+        uint flags,
+        int x = 0,
+        int y = 0,
+        uint mouseData = 0) => new()
+    {
+        Type = InputMouse,
+        Data = new InputUnion
+        {
+            Mouse = new MouseInput
+            {
+                X = x,
+                Y = y,
+                MouseData = mouseData,
+                Flags = flags,
                 Time = 0,
                 ExtraInfo = IntPtr.Zero
             }
@@ -1325,20 +1501,22 @@ internal sealed class WindowsController
         public int Y;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        public IntPtr WindowHandle;
+        public uint Message;
+        public UIntPtr WParam;
+        public IntPtr LParam;
+        public uint Time;
+        public CursorPoint Point;
+        public uint Private;
+    }
+
     private delegate bool EnumWindowsCallback(IntPtr windowHandle, IntPtr parameter);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputCount, Input[] inputs, int size);
-
-    [DllImport("user32.dll")]
-    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
-
-    [DllImport("user32.dll")]
-    private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetCursorPos(int x, int y);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1352,6 +1530,9 @@ internal sealed class WindowsController
     private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    private static extern IntPtr SetActiveWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
 
     [DllImport("user32.dll")]
@@ -1359,6 +1540,15 @@ internal sealed class WindowsController
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekMessage(
+        out NativeMessage message,
+        IntPtr windowHandle,
+        uint filterMinimum,
+        uint filterMaximum,
+        uint removeMessage);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1378,6 +1568,10 @@ internal sealed class WindowsController
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr windowHandle);
 
     [DllImport("user32.dll")]
     private static extern int GetWindowTextLength(IntPtr windowHandle);
