@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - fix/screen-recognition-v0.5.0
+      - fix/app-routing-v0.5.1
     tags:
       - "v*"
 
@@ -74,6 +74,18 @@ jobs:
             throw "Windows OCR self-test failed with exit code $($process.ExitCode)"
           }
 
+      - name: Verify NetEase app routing and result selection
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-netease-automation" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "NetEase routing self-test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
@@ -93,8 +105,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.5.0
+          name: LooyWindowsController-Windows-v0.5.1
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.5.0.exe
+            dist/installer/LooyWindowsController-Setup-0.5.1.exe
           if-no-files-found: error
