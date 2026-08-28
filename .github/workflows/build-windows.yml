@@ -66,6 +66,10 @@ jobs:
             -ArgumentList "--self-test-screen-recognition" `
             -Wait `
             -PassThru
+          $report = Join-Path $env:TEMP "looy-ocr-self-test.txt"
+          if (Test-Path $report) {
+            Get-Content $report
+          }
           if ($process.ExitCode -ne 0) {
             throw "Windows OCR self-test failed with exit code $($process.ExitCode)"
           }
