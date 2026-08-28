@@ -6,11 +6,11 @@
 
 每次 GitHub Actions 构建会生成两个文件：
 
-- `LooyWindowsController-Setup-0.4.1.exe`：Windows 安装程序。
+- `LooyWindowsController-Setup-0.5.0.exe`：Windows 安装程序。
 - `LooyWindowsController-win-x64.zip`：免安装便携版。
 
 安装后打开“路遥智控”，粘贴自己的 MCP 接入点，选择允许的权限和应用，然后点击“连接路遥”。
 
-0.4.1 在 0.3.2 的 64 位键盘修复上继续统一键盘与鼠标输入接口，检查每一次移动、点击和滚动是否真的被 Windows 接收，增强后台线程激活前台窗口的稳定性，并提供应用内“检测键盘与鼠标”真实自检。诊断报告不会包含 MCP Token 或消息内容。
+0.5.0 新增本机屏幕文字识别：搜索完成后可读取前台窗口的可见文字，按短期快照中的编号安全单击抖音视频或双击网易云歌曲。点击前会再次核对窗口、位置和文字；截图只在内存中处理，不保存、不上传。版本同时保留 0.4.1 的 64 位键鼠输入修复和真实自检。
 
 详细说明请查看 [README_CN.md](README_CN.md)，安全边界请查看 [SECURITY.md](SECURITY.md)。
