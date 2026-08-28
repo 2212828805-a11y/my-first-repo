@@ -28,6 +28,7 @@
 | `windows.open_app` | 打开白名单应用 | 开启 |
 | `windows.close_app` | 请求白名单应用正常关闭 | 开启 |
 | `windows.app_action` | 应用搜索、微信/QQ 发消息、记事本新建与写入、媒体控制 | 开启（需要时弹出键盘授权） |
+| `windows.netease_music_task` | 连续完成网易云客户端打开、搜索、识屏和播放第 N 个结果 | 按动作请求键盘、识屏和鼠标授权 |
 | `windows.diagnose_apps` | 检查应用路径和运行窗口，不读取聊天内容或 Token | 开启 |
 | `windows.open_url` | 打开 http/https 网页 | 开启 |
 | `windows.web_search` | 百度、Bing 或 Google 浏览器搜索 | 开启 |
@@ -39,6 +40,7 @@
 | `windows.click` | 单击或双击鼠标 | 首次调用弹窗授权 |
 | `windows.scroll` | 页面滚动 | 首次调用弹窗授权 |
 | `windows.inspect_screen` | 本机 OCR 识别前台窗口并返回带编号的可见文字 | 首次调用弹窗授权 |
+| `windows.open_screen_text` | 识别当前画面上的软件名称并直接单击或双击打开 | 需要屏幕识别和鼠标授权 |
 | `windows.click_screen_item` | 核对快照后单击或双击指定文字编号 | 需要屏幕识别和鼠标授权 |
 | `windows.screenshot` | 截取全部屏幕并保存到本机 | 关闭 |
 
@@ -51,8 +53,8 @@
 - “打开 Edge，搜索郑州明天的天气。”
 - 开启微信和键盘权限后：“用微信给文件传输助手发送：测试完成。”
 - 开启 QQ 和键盘权限后：“用 QQ 给我的手机发送：测试完成。”
-- 开启网易云音乐、键盘和媒体权限后：“在网易云搜索周杰伦。”、“暂停网易云音乐。”、“网易云下一首。”
-- 开启屏幕文字识别和鼠标权限后：“在网易云搜索晴天，播放第一个结果。”
+- 开启网易云音乐和所需权限后：“打开网易云音乐。”、“在网易云搜索晴天并播放第二个结果。”、“暂停网易云音乐。”
+- 当前桌面或菜单显示软件名称时：“打开屏幕上的微信。”同名项目不唯一时，路遥会先返回位置供选择，不会猜测。
 - “在网页搜索抖音美食视频，然后打开第二个视频。”搜索完成后路遥会先识别结果，再按编号单击。
 - “把电脑静音。”
 - “暂停音乐。”
@@ -65,12 +67,13 @@
 当用户要求操作 Windows 电脑时，优先使用 windows.* 工具。
 打开应用前，如果不确定别名，先调用 windows.list_apps。
 任何鼠标、键盘操作都应先确认目标窗口，禁止猜测坐标。
-搜索后需要选择网页视频或音乐时，先调用 windows.inspect_screen，再根据返回的标题文字编号调用 windows.click_screen_item；抖音视频通常单击，网易云歌曲通常双击。
+网易云请求始终优先调用 windows.netease_music_task；不要使用 windows.web_search。只有用户明确要求“用网页/浏览器搜索网易云”时才能使用网页搜索并设置 force_browser=true。
+其他网页结果需要点击时，先调用 windows.inspect_screen，再根据返回的标题文字编号调用 windows.click_screen_item。需要打开当前画面中的软件名称时，调用 windows.open_screen_text。
 ```
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.5.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.5.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -108,9 +111,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.5.0` 的标签。
+- 推送形如 `v0.5.1` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.5.0` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.5.1` artifact 即可。
 
 ## 默认应用列表
 
@@ -121,6 +124,8 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，QQ 兼容新版 QQNT 常见安装目录；两者均支持激活、搜索联系人和发送消息。网易云音乐优先直接启动真实程序，避免自定义协议确认页，并支持搜索、播放/暂停、上一首和下一首。首次需要键盘或鼠标时，电脑会弹出授权窗口，可选择“仅本次连接”或“始终允许”。
 
 0.5.0 在 0.4.1 的 64 位键鼠修复和真实自检基础上新增本机 OCR 屏幕文字识别。搜索结果显示后，`windows.inspect_screen` 会在内存中截取当前前台窗口并返回带编号的文字；`windows.click_screen_item` 会在 90 秒内再次核对同一窗口、窗口位置和目标文字，再移动鼠标完成单击或双击。截图不会保存到磁盘或上传，只有识别出的文字会返回给当前连接的路遥。页面滚动、窗口移动、文字消失或目标窗口改变时，程序会拒绝点击并要求重新识别。
+
+0.5.1 增加 `windows.netease_music_task`，把网易云的打开、搜索、识别结果与双击播放合并为一个连续任务；普通网页搜索会主动拒绝误接网易云应用请求。`windows.open_screen_text` 可在当前画面中查找指定软件文字并执行打开操作；多个同名结果必须明确选择序号，点击前仍会再次核对窗口、位置和文字。
 
 应用配置和加密后的 MCP 地址保存在：
 
