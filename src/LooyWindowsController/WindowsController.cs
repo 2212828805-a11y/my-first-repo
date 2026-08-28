@@ -26,11 +26,12 @@ internal sealed class WindowsController
     private const uint GetAncestorRootOwner = 3;
 
     private readonly Func<string, bool> _permissionEnabled;
-    private readonly Func<string, string, CancellationToken, Task<bool>> _requestInputPermission;
+    private readonly Func<string, string, CancellationToken, Task<bool>> _requestPermission;
     private readonly Func<IReadOnlyList<AppEntry>> _getApps;
     private readonly SettingsStore _settingsStore;
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private ScreenSnapshot? _screenSnapshot;
 
     internal static bool IsNativeInputLayoutValid =>
         Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
@@ -63,15 +64,17 @@ internal sealed class WindowsController
 
     internal ToolExecutionResult ClickLeftForSelfTest() => SendMouseButton("left", 1);
 
+    internal void ClearTransientState() => _screenSnapshot = null;
+
     public WindowsController(
         Func<string, bool> permissionEnabled,
-        Func<string, string, CancellationToken, Task<bool>> requestInputPermission,
+        Func<string, string, CancellationToken, Task<bool>> requestPermission,
         Func<IReadOnlyList<AppEntry>> getApps,
         SettingsStore settingsStore,
         Action<string> log)
     {
         _permissionEnabled = permissionEnabled;
-        _requestInputPermission = requestInputPermission;
+        _requestPermission = requestPermission;
         _getApps = getApps;
         _settingsStore = settingsStore;
         _log = log;
@@ -144,6 +147,14 @@ internal sealed class WindowsController
                     "滚动当前窗口",
                     () => Scroll(RequiredInt(arguments, "amount")),
                     cancellationToken),
+                "windows.inspect_screen" => await InspectScreenAsync(
+                    OptionalInt(arguments, "max_items", 60),
+                    cancellationToken),
+                "windows.click_screen_item" => await ClickScreenItemAsync(
+                    RequiredString(arguments, "snapshot_id"),
+                    RequiredInt(arguments, "index"),
+                    Math.Clamp(OptionalInt(arguments, "clicks", 1), 1, 2),
+                    cancellationToken),
                 "windows.media_control" => RequirePermission(
                     PermissionKeys.Media,
                     () => MediaControl(
@@ -186,7 +197,7 @@ internal sealed class WindowsController
         CancellationToken cancellationToken)
     {
         if (!_permissionEnabled(permission)
-            && !await _requestInputPermission(permission, reason, cancellationToken))
+            && !await _requestPermission(permission, reason, cancellationToken))
         {
             return ToolExecutionResult.Fail("用户没有授权本次键盘或鼠标操作，操作已取消。");
         }
@@ -195,6 +206,194 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("键盘或鼠标授权当前不可用，操作已取消。");
         }
         return action();
+    }
+
+    private async Task<ToolExecutionResult> InspectScreenAsync(
+        int maxItems,
+        CancellationToken cancellationToken)
+    {
+        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
+        {
+            return ToolExecutionResult.Fail("没有找到可识别的前台窗口。请先把网易云音乐或浏览器切到前台。");
+        }
+        if (ScreenRecognitionService.IsOwnedByCurrentProcess(targetHandle))
+        {
+            return ToolExecutionResult.Fail("当前前台是路遥智控窗口。请先把需要操作的网易云音乐或浏览器切到前台，再重新识别。");
+        }
+
+        if (!_permissionEnabled(PermissionKeys.ScreenRecognition)
+            && !await _requestPermission(
+                PermissionKeys.ScreenRecognition,
+                "识别当前前台窗口中的可见文字",
+                cancellationToken))
+        {
+            return ToolExecutionResult.Fail("用户没有授权本次屏幕文字识别，操作已取消。");
+        }
+        if (!_permissionEnabled(PermissionKeys.ScreenRecognition))
+        {
+            return ToolExecutionResult.Fail("屏幕文字识别授权当前不可用，操作已取消。");
+        }
+
+        var processName = ScreenRecognitionService.GetProcessName(targetHandle);
+        IReadOnlyList<string> processNames = string.IsNullOrWhiteSpace(processName)
+            ? Array.Empty<string>()
+            : new[] { processName };
+        if (!EnsureExactTargetIsForeground(targetHandle, processNames))
+        {
+            return ToolExecutionResult.Fail("授权窗口关闭后无法安全恢复原目标窗口。请手动切回目标窗口，再重新识别。");
+        }
+
+        await Task.Delay(180, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(targetHandle))
+        {
+            return ToolExecutionResult.Fail("识别前目标窗口发生变化，已停止读取。请保持目标窗口在前台后重试。");
+        }
+
+        var snapshot = await ScreenRecognitionService.InspectWindowAsync(
+            targetHandle,
+            Math.Clamp(maxItems, 10, 80),
+            cancellationToken);
+        if (snapshot.Items.Count == 0)
+        {
+            return ToolExecutionResult.Fail(
+                "Windows 没有在当前窗口识别到可见文字。请等待搜索结果显示、把页面缩放恢复到正常大小后重试。");
+        }
+
+        _screenSnapshot = snapshot;
+        _log($"已在本机识别前台窗口文字：{snapshot.ProcessName}，共 {snapshot.Items.Count} 项；截图未保存。");
+        var lines = snapshot.Items.Select(item =>
+        {
+            var singleLine = item.Text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (singleLine.Length > 180)
+            {
+                singleLine = singleLine[..180] + "…";
+            }
+            return $"[{item.Index}] {singleLine}";
+        });
+        var message = string.Join(
+            Environment.NewLine,
+            $"屏幕快照 ID：{snapshot.Id}",
+            $"前台程序：{(string.IsNullOrWhiteSpace(snapshot.ProcessName) ? "未知" : snapshot.ProcessName)}",
+            $"识别语言：{snapshot.RecognitionLanguage}",
+            "可见文字（从上到下、同一行从左到右）：",
+            string.Join(Environment.NewLine, lines),
+            "下一步：根据用户要求选中标题等唯一文字，再调用 windows.click_screen_item。抖音视频通常单击，网易云歌曲通常双击；不要选择“播放”“关注”等重复通用文字。快照 90 秒后失效。");
+        return ToolExecutionResult.Ok(message);
+    }
+
+    private async Task<ToolExecutionResult> ClickScreenItemAsync(
+        string snapshotId,
+        int index,
+        int clicks,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = _screenSnapshot;
+        if (snapshot is null || !snapshot.Id.Equals(snapshotId.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return ToolExecutionResult.Fail("快照 ID 不存在或已被新的识别结果替换。请重新调用 windows.inspect_screen，不能猜测编号。");
+        }
+        if (DateTimeOffset.Now - snapshot.CreatedAt > TimeSpan.FromSeconds(90))
+        {
+            _screenSnapshot = null;
+            return ToolExecutionResult.Fail("屏幕快照已超过 90 秒。为避免页面变化后点错，请重新识别屏幕。");
+        }
+        var selected = snapshot.Items.FirstOrDefault(item => item.Index == index);
+        if (selected is null)
+        {
+            return ToolExecutionResult.Fail($"快照 {snapshot.Id} 中没有编号 {index}。请使用识别结果方括号内的编号。");
+        }
+        if (!_permissionEnabled(PermissionKeys.ScreenRecognition))
+        {
+            return ToolExecutionResult.Fail("屏幕文字识别授权已撤回，不能核对点击目标。请重新授权并识别屏幕。");
+        }
+        if (!_permissionEnabled(PermissionKeys.Mouse)
+            && !await _requestPermission(
+                PermissionKeys.Mouse,
+                $"点击屏幕识别结果中的第 {index} 项",
+                cancellationToken))
+        {
+            return ToolExecutionResult.Fail("用户没有授权本次鼠标点击，操作已取消。");
+        }
+        if (!_permissionEnabled(PermissionKeys.Mouse))
+        {
+            return ToolExecutionResult.Fail("鼠标授权当前不可用，操作已取消。");
+        }
+        if (DateTimeOffset.Now - snapshot.CreatedAt > TimeSpan.FromSeconds(90))
+        {
+            _screenSnapshot = null;
+            return ToolExecutionResult.Fail("授权完成时屏幕快照已经过期。请重新识别屏幕后再点击。");
+        }
+        if (!ScreenRecognitionService.IsWindowAvailable(snapshot.WindowHandle))
+        {
+            _screenSnapshot = null;
+            return ToolExecutionResult.Fail("原目标窗口已经关闭。请重新打开或搜索后再识别屏幕。");
+        }
+
+        var processNames = string.IsNullOrWhiteSpace(snapshot.ProcessName)
+            ? Array.Empty<string>()
+            : new[] { snapshot.ProcessName };
+        if (!EnsureExactTargetIsForeground(snapshot.WindowHandle, processNames))
+        {
+            return ToolExecutionResult.Fail("无法安全恢复生成该快照的原窗口，已拒绝点击。请手动切回目标窗口并重新识别。");
+        }
+        if (!ScreenRecognitionService.TryGetWindowBounds(snapshot.WindowHandle, out var currentBounds)
+            || !ScreenRecognitionService.WindowBoundsMatch(snapshot.WindowBounds, currentBounds))
+        {
+            _screenSnapshot = null;
+            return ToolExecutionResult.Fail("目标窗口的位置或大小已经改变。为避免点错，请重新识别屏幕。");
+        }
+
+        await Task.Delay(160, cancellationToken);
+        var refreshed = await ScreenRecognitionService.RefreshItemAsync(snapshot, selected, cancellationToken);
+        if (refreshed is null)
+        {
+            _screenSnapshot = null;
+            return ToolExecutionResult.Fail("页面内容已经变化，原文字不在原位置附近。为避免点错，已取消点击；请重新识别屏幕。");
+        }
+        if (!ScreenRecognitionService.IsExactForegroundWindow(snapshot.WindowHandle))
+        {
+            return ToolExecutionResult.Fail("核对文字后目标窗口失去前台，已取消点击。");
+        }
+
+        var x = refreshed.Bounds.Left + refreshed.Bounds.Width / 2;
+        var y = refreshed.Bounds.Top + refreshed.Bounds.Height / 2;
+        var moveResult = MoveMouse(x, y);
+        if (!moveResult.Success)
+        {
+            return moveResult;
+        }
+        if (!ScreenRecognitionService.IsExactForegroundWindow(snapshot.WindowHandle))
+        {
+            return ToolExecutionResult.Fail("鼠标移动后目标窗口失去前台，已取消单击，避免操作错误窗口。");
+        }
+
+        var clickResult = SendMouseButton("left", clicks);
+        if (!clickResult.Success)
+        {
+            return clickResult;
+        }
+
+        _screenSnapshot = null;
+        _log($"已点击屏幕识别结果：{snapshot.ProcessName}，编号 {index}，次数 {clicks}；识别文字未写入日志。");
+        var displayText = selected.Text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (displayText.Length > 100)
+        {
+            displayText = displayText[..100] + "…";
+        }
+        return ToolExecutionResult.Ok(
+            $"已{(clicks == 2 ? "双击" : "单击")}快照 {snapshot.Id} 的第 {index} 项“{displayText}”。页面变化后如需继续操作，请重新识别屏幕。");
+    }
+
+    private bool EnsureExactTargetIsForeground(IntPtr handle, IReadOnlyList<string> processNames)
+    {
+        if (ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return true;
+        }
+
+        TryBringWindowToFront(handle, processNames);
+        return ScreenRecognitionService.IsExactForegroundWindow(handle);
     }
 
     private static ToolExecutionResult GetSystemStatus()
@@ -391,7 +590,7 @@ internal sealed class WindowsController
                 _ => "在记事本中新建文档"
             };
             if (!_permissionEnabled(PermissionKeys.Keyboard)
-                && !await _requestInputPermission(PermissionKeys.Keyboard, reason, cancellationToken))
+                && !await _requestPermission(PermissionKeys.Keyboard, reason, cancellationToken))
             {
                 return ToolExecutionResult.Fail("用户未授权键盘操作，本次调用已取消。");
             }
