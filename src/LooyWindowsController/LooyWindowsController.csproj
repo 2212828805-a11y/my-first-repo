@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -10,7 +10,7 @@
     <ApplicationIcon>Assets\looy.ico</ApplicationIcon>
     <AssemblyName>LooyWindowsController</AssemblyName>
     <RootNamespace>Looy.WindowsController</RootNamespace>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <Authors>LOOY</Authors>
     <Product>路遥智控</Product>
     <Description>在明确授权范围内安全控制 Windows 电脑</Description>
