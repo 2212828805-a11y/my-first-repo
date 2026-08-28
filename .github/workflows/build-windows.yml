@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - fix/input-control-v0.4.1
+      - fix/screen-recognition-v0.5.0
     tags:
       - "v*"
 
@@ -58,6 +58,18 @@ jobs:
             throw "Windows INPUT layout self-test failed with exit code $($process.ExitCode)"
           }
 
+      - name: Verify local screen recognition
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-screen-recognition" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Windows OCR self-test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
@@ -77,8 +89,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.4.1
+          name: LooyWindowsController-Windows-v0.5.0
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.4.1.exe
+            dist/installer/LooyWindowsController-Setup-0.5.0.exe
           if-no-files-found: error
