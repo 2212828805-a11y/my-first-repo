@@ -239,7 +239,7 @@ internal sealed class McpEndpointClient : IAsyncDisposable
                                 ["serverInfo"] = new Dictionary<string, object?>
                                 {
                                     ["name"] = "LOOY Windows Controller",
-                                    ["version"] = "0.4.1"
+                                    ["version"] = "0.5.0"
                                 }
                             },
                             cancellationToken);
