@@ -11,6 +11,7 @@ internal static class PermissionKeys
     public const string Keyboard = "keyboard";
     public const string Mouse = "mouse";
     public const string Media = "media";
+    public const string ScreenRecognition = "screen_recognition";
     public const string Screenshot = "screenshot";
 
     public static Dictionary<string, bool> CreateDefaults() => new()
@@ -21,6 +22,7 @@ internal static class PermissionKeys
         [Keyboard] = false,
         [Mouse] = false,
         [Media] = true,
+        [ScreenRecognition] = false,
         [Screenshot] = false
     };
 }
