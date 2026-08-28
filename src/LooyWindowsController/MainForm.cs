@@ -29,7 +29,7 @@ internal sealed class MainForm : Form
     private readonly Label _inputAccessStateLabel = new() { AutoSize = true };
     private readonly Label _systemInputAccessLabel = new() { AutoSize = true };
     private readonly Button _elevateButton = new() { Text = "管理员模式重启", Width = 148, Height = 36 };
-    private readonly Button _inputTestButton = new() { Text = "检测键盘与鼠标", Width = 148, Height = 36 };
+    private readonly Button _inputTestButton = new() { Text = "检测键鼠与识屏", Width = 148, Height = 36 };
     private bool _initializing = true;
     private bool _emergencyStopped;
     private bool _closingAfterStop;
@@ -41,7 +41,7 @@ internal sealed class MainForm : Form
         _apps = new BindingList<AppEntry>(_settings.Apps.Select(app => app.Clone()).ToList());
         _windowsController = new WindowsController(
             IsPermissionEnabled,
-            RequestInputPermissionAsync,
+            RequestSensitivePermissionAsync,
             () => _apps.Select(app => app.Clone()).ToArray(),
             _settingsStore,
             WriteLog);
@@ -55,12 +55,12 @@ internal sealed class MainForm : Form
         ApplySettingsToUi();
         WireEvents();
         _initializing = false;
-        WriteLog("路遥智控 0.4.1 已启动。连接密钥不会显示在运行记录中。");
+        WriteLog("路遥智控 0.5.0 已启动。连接密钥不会显示在运行记录中。");
     }
 
     private void BuildWindow()
     {
-        Text = "路遥智控 · LOOY v0.4.1";
+        Text = "路遥智控 · LOOY v0.5.0";
         Width = 1040;
         Height = 760;
         MinimumSize = new Size(900, 680);
@@ -273,7 +273,7 @@ internal sealed class MainForm : Form
         layout.Controls.Add(AppTheme.SectionTitle("决定路遥可以做什么"), 0, 0);
         layout.Controls.Add(new Label
         {
-            Text = "授权随时可以撤回。键盘、鼠标和截图等敏感能力默认保持关闭。",
+            Text = "授权随时可以撤回。键盘、鼠标、屏幕文字识别和截图等敏感能力默认保持关闭。",
             AutoSize = true,
             ForeColor = AppTheme.Muted,
             Anchor = AnchorStyles.Left
@@ -335,6 +335,7 @@ internal sealed class MainForm : Form
         AddPermission(permissionPanel, PermissionKeys.Media, "音量与媒体控制", "调节音量、静音、播放暂停和切歌。", true);
         AddPermission(permissionPanel, PermissionKeys.Keyboard, "键盘输入和快捷键", "能够向当前窗口输入文字并发送快捷键。", false);
         AddPermission(permissionPanel, PermissionKeys.Mouse, "鼠标移动、点击和滚动", "能够操作当前桌面，请谨慎开启。", false);
+        AddPermission(permissionPanel, PermissionKeys.ScreenRecognition, "识别前台窗口文字", "截图只在本机内存中识别且不保存；识别出的文字会返回给当前连接的路遥。", false);
         AddPermission(permissionPanel, PermissionKeys.Screenshot, "截取屏幕", "截图可能包含聊天、账号或其他隐私信息。", false);
         layout.Controls.Add(permissionPanel, 0, 3);
 
@@ -673,6 +674,86 @@ internal sealed class MainForm : Form
         Close();
     }
 
+    private Task<bool> RequestSensitivePermissionAsync(
+        string permission,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        return permission == PermissionKeys.ScreenRecognition
+            ? RequestScreenRecognitionPermissionAsync(reason, cancellationToken)
+            : RequestInputPermissionAsync(permission, reason, cancellationToken);
+    }
+
+    private async Task<bool> RequestScreenRecognitionPermissionAsync(
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (IsPermissionEnabled(PermissionKeys.ScreenRecognition))
+        {
+            return true;
+        }
+        if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellationRegistration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+        void ShowDialogOnUi()
+        {
+            if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
+            {
+                completion.TrySetResult(false);
+                return;
+            }
+
+            var answer = MessageBox.Show(
+                this,
+                $"本次请求：{reason}\n\n"
+                + "路遥智控会在本机内存中截取当前前台窗口，并使用 Windows OCR 读取可见文字。截图不会保存到磁盘，也不会上传；识别出的文字会返回给当前连接的路遥，用于按编号选择并点击。\n\n"
+                + "本授权仅在这次连接中有效，断开连接后自动撤回。是否允许？",
+                "屏幕文字识别授权",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes)
+            {
+                WriteLog("用户取消了屏幕文字识别授权。");
+                completion.TrySetResult(false);
+                return;
+            }
+
+            _emergencyStopped = false;
+            _sessionPermissions.Add(PermissionKeys.ScreenRecognition);
+            WriteLog("已授权本次连接识别前台窗口文字；截图只在本机内存中处理，不会保存。");
+            completion.TrySetResult(true);
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(ShowDialogOnUi);
+            }
+            catch
+            {
+                completion.TrySetResult(false);
+            }
+        }
+        else
+        {
+            ShowDialogOnUi();
+        }
+
+        try
+        {
+            return await completion.Task;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
     private async Task<bool> RequestInputPermissionAsync(
         string permission,
         string reason,
@@ -837,6 +918,7 @@ internal sealed class MainForm : Form
     {
         _disconnectButton.Enabled = false;
         await _mcpClient.StopAsync();
+        _windowsController.ClearTransientState();
         _sessionPermissions.Clear();
         UpdateInputAccessState();
         _connectButton.Enabled = true;
