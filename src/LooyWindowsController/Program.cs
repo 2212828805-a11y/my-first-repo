@@ -17,6 +17,24 @@ internal static class Program
             Environment.ExitCode = WindowsController.IsNativeInputEngineValid ? 0 : 87;
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-screen-recognition", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                Environment.ExitCode = ScreenRecognitionService
+                    .RunComponentSelfTestAsync()
+                    .GetAwaiter()
+                    .GetResult()
+                    ? 0
+                    : 87;
+            }
+            catch
+            {
+                Environment.ExitCode = 87;
+            }
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
