@@ -22,7 +22,7 @@ internal static class ToolCatalog
                 Properties()));
             tools.Add(Tool(
                 "windows.open_app",
-                "按白名单别名打开一个 Windows 应用。只能打开用户明确允许的应用。",
+                "按白名单别名打开一个 Windows 桌面应用。只能打开用户明确允许的应用。用户只要求打开网易云音乐时，应使用 windows.netease_music_task，而不是浏览器或网页搜索。",
                 Properties(
                     Required("app", "string", "应用别名，例如 notepad、edge、wechat。"))));
             tools.Add(Tool(
@@ -31,8 +31,15 @@ internal static class ToolCatalog
                 Properties(
                     Required("app", "string", "应用别名。"))));
             tools.Add(Tool(
+                "windows.netease_music_task",
+                "网易云音乐桌面客户端专用连续任务。用户提到打开网易云、在网易云搜索、播放第几个搜索结果、暂停或切歌时，必须优先调用本工具，禁止改用 windows.web_search。open 只打开桌面应用；search 会在一次调用中打开/激活应用并输入搜索词；search_and_play 会连续完成打开、搜索、本机识屏并双击第 N 个歌曲结果。",
+                Properties(
+                    RequiredEnum("action", "网易云任务。", "open", "search", "search_and_play", "play_pause", "previous", "next"),
+                    Optional("query", "string", "search 或 search_and_play 的歌曲、歌手或搜索关键词。"),
+                    OptionalInteger("result_number", "search_and_play 要播放搜索结果中的第几个，默认 1，范围 1 到 20。", 1, 20))));
+            tools.Add(Tool(
                 "windows.app_action",
-                "对指定白名单应用执行动作。支持窗口激活、应用内搜索、微信或 QQ 发消息、记事本新建与写入，以及媒体播放控制。键盘未授权时会先在电脑上弹出授权窗口；输入前会确认目标应用仍在前台。",
+                "对指定白名单应用执行动作。支持窗口激活、应用内搜索、微信或 QQ 发消息、记事本新建与写入，以及媒体播放控制。网易云相关请求应改用 windows.netease_music_task，以保证打开、搜索和播放动作连续完成。键盘未授权时会先在电脑上弹出授权窗口；输入前会确认目标应用仍在前台。",
                 Properties(
                     Required("app", "string", "应用别名，例如 wechat、qq、netease_music、notepad。"),
                     RequiredEnum("action", "应用动作。", "activate", "search", "send_message", "new_document", "write_text", "new_and_write", "play_pause", "previous", "next"),
@@ -55,10 +62,11 @@ internal static class ToolCatalog
                     Required("url", "string", "完整的 http 或 https 地址。"))));
             tools.Add(Tool(
                 "windows.web_search",
-                "直接在默认浏览器打开搜索结果。用户要求浏览器搜索时优先调用本工具，不要先打开浏览器再用应用内搜索。",
+                "只用于用户明确要求网页或浏览器搜索。不得用于打开网易云音乐或在网易云客户端搜索；网易云请求必须调用 windows.netease_music_task。仅当用户明确说“用浏览器/网页搜索网易云”时，才把 force_browser 设为 true。",
                 Properties(
                     Required("query", "string", "要搜索的内容。"),
-                    OptionalEnum("engine", "搜索引擎，默认 baidu。", "baidu", "bing", "google"))));
+                    OptionalEnum("engine", "搜索引擎，默认 baidu。", "baidu", "bing", "google"),
+                    Optional("force_browser", "boolean", "用户明确要求用浏览器搜索网易云时设为 true；否则省略。"))));
         }
 
         tools.Add(Tool(
@@ -101,6 +109,13 @@ internal static class ToolCatalog
             "在本机截取并 OCR 识别当前前台窗口，返回带编号的可见文字和短期快照 ID；截图只在内存中处理，不保存到磁盘，但识别出的文字会返回给当前连接的路遥。网页或网易云搜索完成后，必须先调用本工具读取结果，禁止猜测坐标。未授权时会在电脑上弹窗询问。",
             Properties(
                 OptionalInteger("max_items", "最多返回的可见文字条目，默认 60。", 10, 80))));
+        tools.Add(Tool(
+            "windows.open_screen_text",
+            "识别当前前台画面并按可见文字打开软件或项目，一次调用完成 OCR、定位和点击。适用于“打开屏幕上的微信/某某软件”等请求，不执行路径、命令或后台启动。桌面图标默认双击，开始菜单等菜单项默认单击；同名结果不唯一时必须提供 occurrence，禁止猜测。需要屏幕文字识别和鼠标授权。",
+            Properties(
+                Required("text", "string", "屏幕上可见的软件或项目名称，例如 微信、网易云音乐。"),
+                OptionalInteger("occurrence", "同名结果从上到下、从左到右的第几个；只有出现多个匹配项时才提供。", 1, 20),
+                OptionalInteger("clicks", "可显式指定 1=单击、2=双击；省略时程序根据桌面或菜单自动选择。", 1, 2))));
         tools.Add(Tool(
             "windows.click_screen_item",
             "点击 windows.inspect_screen 返回的某个文字编号。调用前必须使用同一快照 ID，选择标题等唯一文字，不能把用户说的“第几个结果”直接当成本参数。抖音视频标题通常单击（clicks=1），网易云歌曲标题通常双击（clicks=2）。点击前会重新识别并核对文字、窗口与位置；页面变化时会拒绝点击。",
