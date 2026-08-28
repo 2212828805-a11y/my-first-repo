@@ -37,6 +37,12 @@ internal static class Program
             }
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-netease-automation", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = NeteaseMusicAutomation.RunComponentSelfTest() ? 0 : 87;
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
