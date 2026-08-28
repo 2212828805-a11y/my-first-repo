@@ -32,6 +32,25 @@ internal sealed class WindowsController
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _actionLock = new(1, 1);
     private ScreenSnapshot? _screenSnapshot;
+    private PendingChatSend? _pendingChatSend;
+
+    private sealed record PendingChatSend(
+        string ConfirmationId,
+        string AppAlias,
+        string AppDisplayName,
+        string Recipient,
+        string Message,
+        IntPtr WindowHandle,
+        IReadOnlyList<string> ProcessNames,
+        Rectangle WindowBounds,
+        Rectangle HeaderBounds,
+        Rectangle MessageBounds,
+        DateTimeOffset CreatedAt);
+
+    private sealed record VerifiedSearchInput(
+        ScreenSnapshot Snapshot,
+        ScreenTextItem OriginalField,
+        ScreenTextItem TypedQuery);
 
     internal static bool IsNativeInputLayoutValid =>
         Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
@@ -64,7 +83,11 @@ internal sealed class WindowsController
 
     internal ToolExecutionResult ClickLeftForSelfTest() => SendMouseButton("left", 1);
 
-    internal void ClearTransientState() => _screenSnapshot = null;
+    internal void ClearTransientState()
+    {
+        _screenSnapshot = null;
+        _pendingChatSend = null;
+    }
 
     public WindowsController(
         Func<string, bool> permissionEnabled,
@@ -115,6 +138,21 @@ internal sealed class WindowsController
                         OptionalString(arguments, "message", string.Empty),
                         OptionalString(arguments, "text", string.Empty),
                         cancellationToken),
+                "windows.prepare_chat_message" => !_permissionEnabled(PermissionKeys.Applications)
+                    ? ToolExecutionResult.Fail("用户尚未在路遥智控中授权应用操作。")
+                    : await AppActionAsync(
+                        RequiredString(arguments, "app"),
+                        "send_message",
+                        string.Empty,
+                        RequiredString(arguments, "recipient"),
+                        RequiredString(arguments, "message"),
+                        string.Empty,
+                        cancellationToken),
+                "windows.confirm_chat_send" => !_permissionEnabled(PermissionKeys.Applications)
+                    ? ToolExecutionResult.Fail("用户尚未在路遥智控中授权应用操作。")
+                    : await ConfirmChatSendAsync(
+                        RequiredString(arguments, "confirmation_id"),
+                        cancellationToken),
                 "windows.diagnose_apps" => RequirePermission(PermissionKeys.Applications, DiagnoseApps),
                 "windows.open_url" => RequirePermission(
                     PermissionKeys.Web,
@@ -125,6 +163,9 @@ internal sealed class WindowsController
                         RequiredString(arguments, "query"),
                         OptionalString(arguments, "engine", "baidu"),
                         OptionalBool(arguments, "force_browser", false))),
+                "windows.verified_screen_search" => await VerifiedScreenSearchAsync(
+                    RequiredString(arguments, "query"),
+                    cancellationToken),
                 "windows.type_text" => await RequireInputPermissionAsync(
                     PermissionKeys.Keyboard,
                     "向当前窗口输入文字",
@@ -220,6 +261,263 @@ internal sealed class WindowsController
         }
         return action();
     }
+
+    private async Task<ToolExecutionResult?> EnsureAutomationPermissionAsync(
+        string permission,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (_permissionEnabled(permission))
+        {
+            return null;
+        }
+        if (!await _requestPermission(permission, reason, cancellationToken)
+            || !_permissionEnabled(permission))
+        {
+            return ToolExecutionResult.Fail($"用户没有授权“{reason}”，本次操作已取消。");
+        }
+        return null;
+    }
+
+    private async Task<ToolExecutionResult> VerifiedScreenSearchAsync(
+        string query,
+        CancellationToken cancellationToken)
+    {
+        query = query.Trim();
+        if (query.Length is < 1 or > 200 || query.IndexOfAny(['\r', '\n']) >= 0)
+        {
+            return ToolExecutionResult.Fail("搜索关键词必须是 1 到 200 个字符的单行文字。");
+        }
+
+        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
+        {
+            return ToolExecutionResult.Fail("没有找到可操作的前台窗口。请先打开包含搜索框的应用或网页。");
+        }
+        if (ScreenRecognitionService.IsOwnedByCurrentProcess(targetHandle))
+        {
+            return ToolExecutionResult.Fail("当前前台是路遥智控窗口。请先切回需要搜索的应用或网页。");
+        }
+
+        foreach (var request in new[]
+                 {
+                     (PermissionKeys.Keyboard, "向搜索框输入并提交搜索词"),
+                     (PermissionKeys.ScreenRecognition, "识别并核对搜索框中的文字"),
+                     (PermissionKeys.Mouse, "聚焦搜索框或点击识别到的搜索按钮")
+                 })
+        {
+            var denied = await EnsureAutomationPermissionAsync(
+                request.Item1,
+                request.Item2,
+                cancellationToken);
+            if (denied is { } failure)
+            {
+                return failure;
+            }
+        }
+
+        var processName = ScreenRecognitionService.GetProcessName(targetHandle);
+        IReadOnlyList<string> processNames = string.IsNullOrWhiteSpace(processName)
+            ? Array.Empty<string>()
+            : new[] { processName };
+        if (!EnsureExactTargetIsForeground(targetHandle, processNames))
+        {
+            return ToolExecutionResult.Fail("授权窗口关闭后无法安全恢复原搜索窗口。请手动切回后重试。");
+        }
+
+        return await PerformVerifiedSearchAsync(
+            string.IsNullOrWhiteSpace(processName) ? "当前窗口" : processName,
+            targetHandle,
+            processNames,
+            query,
+            cancellationToken);
+    }
+
+    private async Task<ToolExecutionResult> PerformVerifiedSearchAsync(
+        string displayName,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string query,
+        CancellationToken cancellationToken)
+    {
+        var filled = await FillAndVerifySearchBoxAsync(
+            displayName,
+            handle,
+            processNames,
+            query,
+            cancellationToken);
+        if (!filled.Result.Success || filled.Input is null)
+        {
+            return filled.Result;
+        }
+
+        var input = filled.Input;
+        var submit = ScreenAutomationHeuristics.FindSearchSubmitButton(
+            input.Snapshot,
+            input.TypedQuery,
+            input.OriginalField.Bounds);
+        if (submit is not null)
+        {
+            var clickResult = await ClickRecognizedItemAsync(
+                input.Snapshot,
+                submit,
+                1,
+                cancellationToken);
+            if (!clickResult.Success)
+            {
+                return ToolExecutionResult.Fail(
+                    $"已核对搜索词“{query}”，但点击识别到的搜索按钮时停止：{clickResult.Message}");
+            }
+
+            _log($"已在 {displayName} 核对搜索词后点击屏幕识别到的搜索按钮。");
+            return ToolExecutionResult.Ok(
+                $"已在 {displayName} 输入并核对“{query}”，屏幕检测到独立搜索按钮，已用鼠标单击提交。");
+        }
+
+        if (!EnsureExactTargetIsForeground(handle, processNames))
+        {
+            return ToolExecutionResult.Fail($"{displayName} 在提交搜索前失去前台，已取消操作。");
+        }
+        var enterResult = PressHotkey("enter");
+        if (!enterResult.Success)
+        {
+            return enterResult;
+        }
+
+        _log($"已在 {displayName} 核对搜索词；屏幕未发现唯一的独立搜索按钮，使用回车提交。");
+        return ToolExecutionResult.Ok(
+            $"已在 {displayName} 输入并核对“{query}”；屏幕未发现唯一的独立搜索按钮，已在搜索框中按回车提交。");
+    }
+
+    private async Task<(ToolExecutionResult Result, VerifiedSearchInput? Input)> FillAndVerifySearchBoxAsync(
+        string displayName,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string query,
+        CancellationToken cancellationToken)
+    {
+        if (!EnsureExactTargetIsForeground(handle, processNames))
+        {
+            return (ToolExecutionResult.Fail($"{displayName} 没有保持在前台，已停止搜索。"), null);
+        }
+
+        await Task.Delay(180, cancellationToken);
+        var initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+        var searchField = ScreenAutomationHeuristics.FindSearchField(initial);
+        if (searchField is null)
+        {
+            // Ctrl+F only requests that the target application reveal/focus its
+            // search UI. No search is submitted before the text is verified.
+            var revealResult = PressHotkey("ctrl+f");
+            if (!revealResult.Success)
+            {
+                return (revealResult, null);
+            }
+            await Task.Delay(420, cancellationToken);
+            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                return (ToolExecutionResult.Fail($"{displayName} 在显示搜索框时失去前台，已停止输入。"), null);
+            }
+            initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+            searchField = ScreenAutomationHeuristics.FindSearchField(initial);
+        }
+        if (searchField is null)
+        {
+            return (ToolExecutionResult.Fail(
+                $"屏幕上没有识别到 {displayName} 的搜索框。为避免把文字输入错误位置，没有继续操作。"), null);
+        }
+
+        var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
+        if (!focusResult.Success)
+        {
+            return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
+        }
+        await Task.Delay(120, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return (ToolExecutionResult.Fail($"{displayName} 的搜索框聚焦后窗口发生变化，已停止输入。"), null);
+        }
+
+        var selectAllResult = PressHotkey("ctrl+a");
+        if (!selectAllResult.Success)
+        {
+            return (selectAllResult, null);
+        }
+        await Task.Delay(60, cancellationToken);
+        var typeResult = TypeText(query);
+        if (!typeResult.Success)
+        {
+            return (typeResult, null);
+        }
+
+        await Task.Delay(360, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return (ToolExecutionResult.Fail(
+                $"{displayName} 在核对搜索词前失去前台；文字可能已输入，但没有提交搜索。"), null);
+        }
+        var verification = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+        var typedQuery = ScreenAutomationHeuristics.FindTypedSearchText(
+            verification,
+            query,
+            searchField.Bounds);
+        if (typedQuery is null)
+        {
+            return (ToolExecutionResult.Fail(
+                $"已经尝试输入“{query}”，但屏幕识别没有在原搜索框位置核对到相同文字，因此没有点击搜索或按回车。"), null);
+        }
+
+        return (
+            ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
+            new VerifiedSearchInput(verification, searchField, typedQuery));
+    }
+
+    private async Task<ToolExecutionResult> ClickRecognizedItemAsync(
+        ScreenSnapshot snapshot,
+        ScreenTextItem expected,
+        int clicks,
+        CancellationToken cancellationToken,
+        Func<ScreenTextItem, Point>? pointResolver = null)
+    {
+        if (!ScreenRecognitionService.IsWindowAvailable(snapshot.WindowHandle)
+            || !EnsureExactTargetIsForeground(snapshot.WindowHandle, BuildProcessNames(snapshot.ProcessName)))
+        {
+            return ToolExecutionResult.Fail("无法安全恢复生成识别结果的原窗口。");
+        }
+        if (!ScreenRecognitionService.TryGetWindowBounds(snapshot.WindowHandle, out var currentBounds)
+            || !ScreenRecognitionService.WindowBoundsMatch(snapshot.WindowBounds, currentBounds))
+        {
+            return ToolExecutionResult.Fail("目标窗口的位置或大小已经改变，请重新识别。");
+        }
+
+        var refreshed = await ScreenRecognitionService.RefreshItemAsync(snapshot, expected, cancellationToken);
+        if (refreshed is null || !ScreenRecognitionService.IsExactForegroundWindow(snapshot.WindowHandle))
+        {
+            return ToolExecutionResult.Fail("识别到的文字已经移动、消失或目标窗口失去前台，已取消点击。");
+        }
+        var point = pointResolver?.Invoke(refreshed)
+                    ?? new Point(
+                        refreshed.Bounds.Left + refreshed.Bounds.Width / 2,
+                        refreshed.Bounds.Top + refreshed.Bounds.Height / 2);
+        if (!snapshot.WindowBounds.Contains(point))
+        {
+            return ToolExecutionResult.Fail("识别目标计算出的点击位置超出窗口范围。");
+        }
+
+        var moveResult = MoveMouse(point.X, point.Y);
+        if (!moveResult.Success)
+        {
+            return moveResult;
+        }
+        if (!ScreenRecognitionService.IsExactForegroundWindow(snapshot.WindowHandle))
+        {
+            return ToolExecutionResult.Fail("鼠标移动后目标窗口失去前台，已取消点击。");
+        }
+        return SendMouseButton("left", clicks);
+    }
+
+    private static IReadOnlyList<string> BuildProcessNames(string processName) =>
+        string.IsNullOrWhiteSpace(processName) ? Array.Empty<string>() : new[] { processName };
 
     private async Task<ToolExecutionResult> InspectScreenAsync(
         int maxItems,
@@ -799,15 +1097,37 @@ internal sealed class WindowsController
         {
             var reason = normalizedAction switch
             {
-                "search" => $"在 {app.DisplayName} 中搜索",
-                "send_message" => $"在 {app.DisplayName} 中选择联系人并发送消息",
+                "search" => $"在 {app.DisplayName} 中输入并核对搜索词",
+                "send_message" => $"在 {app.DisplayName} 中准备消息（本步骤不会发送）",
                 "write_text" or "new_and_write" => "在记事本中创建并写入内容",
                 _ => "在记事本中新建文档"
             };
-            if (!_permissionEnabled(PermissionKeys.Keyboard)
-                && !await _requestPermission(PermissionKeys.Keyboard, reason, cancellationToken))
+            var denied = await EnsureAutomationPermissionAsync(
+                PermissionKeys.Keyboard,
+                reason,
+                cancellationToken);
+            if (denied is { } failure)
             {
-                return ToolExecutionResult.Fail("用户未授权键盘操作，本次调用已取消。");
+                return failure;
+            }
+        }
+
+        if (normalizedAction is "search" or "send_message")
+        {
+            foreach (var request in new[]
+                     {
+                         (PermissionKeys.ScreenRecognition, $"识别并核对 {app.DisplayName} 的搜索框和文字"),
+                         (PermissionKeys.Mouse, $"聚焦 {app.DisplayName} 的搜索框并点击核对后的目标")
+                     })
+            {
+                var denied = await EnsureAutomationPermissionAsync(
+                    request.Item1,
+                    request.Item2,
+                    cancellationToken);
+                if (denied is { } failure)
+                {
+                    return failure;
+                }
             }
         }
 
@@ -837,7 +1157,7 @@ internal sealed class WindowsController
 
         if (normalizedAction == "send_message")
         {
-            return await SendChatMessageAsync(app, handle, processNames, recipient, message, cancellationToken);
+            return await PrepareChatMessageAsync(app, handle, processNames, recipient, message, cancellationToken);
         }
 
         if (normalizedAction == "new_document")
@@ -942,61 +1262,15 @@ internal sealed class WindowsController
         string query,
         CancellationToken cancellationToken)
     {
-        if (!EnsureTargetIsForeground(handle, processNames))
-        {
-            return ToolExecutionResult.Fail($"{app.DisplayName} 没有保持在前台，已取消输入，避免把搜索词发到错误窗口。");
-        }
-
-        PressHotkey("esc");
-        await Task.Delay(100, cancellationToken);
-        var hotkeyResult = PressHotkey("ctrl+f");
-        if (!hotkeyResult.Success)
-        {
-            return hotkeyResult;
-        }
-
-        var focusDelay = app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase) ? 650 : 420;
-        await Task.Delay(focusDelay, cancellationToken);
-        if (!IsTargetWindowForeground(handle, processNames))
-        {
-            return ToolExecutionResult.Fail($"{app.DisplayName} 的窗口失去前台，已停止输入，请重试。");
-        }
-
-        var selectAllResult = PressHotkey("ctrl+a");
-        if (!selectAllResult.Success)
-        {
-            return selectAllResult;
-        }
-        await Task.Delay(80, cancellationToken);
-        if (!_permissionEnabled(PermissionKeys.Keyboard))
-        {
-            return ToolExecutionResult.Fail("键盘授权已撤回，搜索已停止。");
-        }
-        var typeResult = TypeText(query);
-        if (!typeResult.Success)
-        {
-            return typeResult;
-        }
-
-        if (app.Alias.Equals("netease_music", StringComparison.OrdinalIgnoreCase))
-        {
-            await Task.Delay(320, cancellationToken);
-            if (!IsTargetWindowForeground(handle, processNames))
-            {
-                return ToolExecutionResult.Fail("网易云音乐在提交搜索前失去焦点，已取消操作。");
-            }
-            var enterResult = PressHotkey("enter");
-            if (!enterResult.Success)
-            {
-                return enterResult;
-            }
-        }
-
-        _log($"已在 {app.DisplayName} 中搜索：{query}");
-        return ToolExecutionResult.Ok($"已在 {app.DisplayName} 中搜索：{query}。");
+        return await PerformVerifiedSearchAsync(
+            app.DisplayName,
+            handle,
+            processNames,
+            query,
+            cancellationToken);
     }
 
-    private async Task<ToolExecutionResult> SendChatMessageAsync(
+    private async Task<ToolExecutionResult> PrepareChatMessageAsync(
         AppEntry app,
         IntPtr handle,
         IReadOnlyList<string> processNames,
@@ -1004,57 +1278,106 @@ internal sealed class WindowsController
         string message,
         CancellationToken cancellationToken)
     {
-        if (!EnsureTargetIsForeground(handle, processNames))
+        // A new recipient or message always invalidates the previous one-time
+        // confirmation. This prevents an old confirmation from sending to a
+        // conversation selected by a newer request.
+        _pendingChatSend = null;
+
+        if (!EnsureExactTargetIsForeground(handle, processNames))
         {
-            return ToolExecutionResult.Fail($"{app.DisplayName} 没有保持在前台，已取消发送，避免消息进入错误窗口。");
+            return ToolExecutionResult.Fail($"{app.DisplayName} 没有保持在前台，已取消消息准备，避免输入到错误窗口。");
         }
 
-        PressHotkey("esc");
-        await Task.Delay(120, cancellationToken);
-        var searchResult = PressHotkey("ctrl+f");
-        if (!searchResult.Success)
+        var filled = await FillAndVerifySearchBoxAsync(
+            app.DisplayName,
+            handle,
+            processNames,
+            recipient,
+            cancellationToken);
+        if (!filled.Result.Success || filled.Input is null)
         {
-            return searchResult;
-        }
-        var searchDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 700 : 500;
-        await Task.Delay(searchDelay, cancellationToken);
-        if (!IsTargetWindowForeground(handle, processNames))
-        {
-            return ToolExecutionResult.Fail($"{app.DisplayName} 的窗口失去前台，已取消发送。");
+            return ToolExecutionResult.Fail($"联系人搜索未完成，消息没有输入：{filled.Result.Message}");
         }
 
+        // QQ and WeChat both show live contact results. The verified search text
+        // is never submitted with Enter because that would blindly open the
+        // first result. Instead, wait for OCR and click the one exact contact.
+        var resultDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 1050 : 850;
+        await Task.Delay(resultDelay, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return ToolExecutionResult.Fail($"等待 {app.DisplayName} 联系人结果时窗口失去前台，消息没有输入。");
+        }
+        var resultSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+        var contact = ScreenAutomationHeuristics.FindRecipientResult(
+            resultSnapshot,
+            recipient,
+            filled.Input.OriginalField.Bounds);
+        if (contact is null)
+        {
+            return ToolExecutionResult.Fail(
+                $"已经在 {app.DisplayName} 搜索框中输入并核对“{recipient}”，但没有识别到唯一同名联系人。为避免发错人，没有按回车、没有猜测选择，也没有输入消息。");
+        }
+
+        var openConversationResult = await ClickRecognizedItemAsync(
+            resultSnapshot,
+            contact,
+            1,
+            cancellationToken);
+        if (!openConversationResult.Success)
+        {
+            return ToolExecutionResult.Fail($"联系人“{recipient}”核对成功，但打开会话时停止：{openConversationResult.Message}");
+        }
+
+        await Task.Delay(650, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return ToolExecutionResult.Fail($"打开 {app.DisplayName} 会话后窗口失去前台，消息没有输入。");
+        }
+        var conversationSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+        var header = ScreenAutomationHeuristics.FindConversationHeader(conversationSnapshot, recipient);
+        if (header is null)
+        {
+            return ToolExecutionResult.Fail(
+                $"已点击联系人“{recipient}”，但屏幕没有在会话标题位置核对到该名称，因此没有输入消息。");
+        }
+        var composerTarget = ScreenAutomationHeuristics.FindComposerTarget(conversationSnapshot);
+        if (composerTarget is null)
+        {
+            return ToolExecutionResult.Fail(
+                $"已核对 {app.DisplayName} 会话“{recipient}”，但无法可靠定位消息输入框，因此没有输入消息。");
+        }
+
+        var focusComposerResult = await ClickRecognizedItemAsync(
+            conversationSnapshot,
+            composerTarget.Anchor,
+            1,
+            cancellationToken,
+            refreshed => ScreenAutomationHeuristics.ResolveComposerPoint(
+                conversationSnapshot,
+                refreshed,
+                composerTarget.AnchorIsSendButton));
+        if (!focusComposerResult.Success)
+        {
+            return ToolExecutionResult.Fail($"无法安全聚焦消息输入框：{focusComposerResult.Message}");
+        }
+        await Task.Delay(100, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return ToolExecutionResult.Fail($"{app.DisplayName} 的消息输入框聚焦后窗口失去前台，消息没有输入。");
+        }
+
+        // Replace any old draft in the selected composer, preventing an earlier
+        // unfinished message from being appended and sent as extra content.
         var selectAllResult = PressHotkey("ctrl+a");
         if (!selectAllResult.Success)
         {
             return selectAllResult;
         }
-        await Task.Delay(80, cancellationToken);
-        var recipientResult = TypeText(recipient);
-        if (!recipientResult.Success)
+        var clearResult = PressHotkey("backspace");
+        if (!clearResult.Success)
         {
-            return recipientResult;
-        }
-
-        var resultDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 1100 : 900;
-        await Task.Delay(resultDelay, cancellationToken);
-        if (!IsTargetWindowForeground(handle, processNames))
-        {
-            return ToolExecutionResult.Fail($"等待 {app.DisplayName} 联系人结果时窗口失去前台，消息未发送。");
-        }
-        var openConversationResult = PressHotkey("enter");
-        if (!openConversationResult.Success)
-        {
-            return openConversationResult;
-        }
-
-        await Task.Delay(600, cancellationToken);
-        if (!IsTargetWindowForeground(handle, processNames))
-        {
-            return ToolExecutionResult.Fail($"打开 {app.DisplayName} 会话后窗口失去前台，消息未发送。");
-        }
-        if (!_permissionEnabled(PermissionKeys.Keyboard))
-        {
-            return ToolExecutionResult.Fail("键盘授权已撤回，消息未输入。");
+            return clearResult;
         }
         var messageResult = TypeText(message);
         if (!messageResult.Success)
@@ -1062,23 +1385,160 @@ internal sealed class WindowsController
             return messageResult;
         }
 
-        await Task.Delay(120, cancellationToken);
-        if (!IsTargetWindowForeground(handle, processNames))
+        await Task.Delay(380, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
         {
-            return ToolExecutionResult.Fail($"{app.DisplayName} 在发送前失去前台，消息内容已输入但没有按下发送键。");
+            return ToolExecutionResult.Fail(
+                $"{app.DisplayName} 在核对消息草稿前失去前台；没有执行发送，请重新准备。");
         }
-        if (!_permissionEnabled(PermissionKeys.Keyboard))
+        var preparedSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+        var verifiedHeader = ScreenAutomationHeuristics.FindConversationHeader(
+            preparedSnapshot,
+            recipient,
+            header.Bounds);
+        var verifiedMessage = ScreenAutomationHeuristics.FindTypedMessage(preparedSnapshot, message);
+        if (verifiedHeader is null || verifiedMessage is null)
         {
-            return ToolExecutionResult.Fail("键盘授权已撤回，消息内容已输入但没有按下发送键。");
-        }
-        var sendResult = PressHotkey("enter");
-        if (!sendResult.Success)
-        {
-            return sendResult;
+            return ToolExecutionResult.Fail(
+                $"消息文字已经尝试填入，但屏幕无法同时核对联系人标题和草稿内容，因此没有生成发送确认；请检查界面后重新准备。");
         }
 
-        _log($"已向 {app.DisplayName} 联系人 {recipient} 执行发送（{message.Length} 个字符，内容未写入日志）。");
-        return ToolExecutionResult.Ok($"已在 {app.DisplayName} 联系人“{recipient}”的会话中按下发送键。");
+        var confirmationId = Guid.NewGuid().ToString("N")[..8];
+        _pendingChatSend = new PendingChatSend(
+            confirmationId,
+            app.Alias,
+            app.DisplayName,
+            recipient,
+            message,
+            handle,
+            processNames.ToArray(),
+            preparedSnapshot.WindowBounds,
+            verifiedHeader.Bounds,
+            verifiedMessage.Bounds,
+            DateTimeOffset.Now);
+        _log($"已在 {app.DisplayName} 准备给 {recipient} 的消息（{message.Length} 个字符）；尚未发送，内容未写入日志。");
+        return ToolExecutionResult.Ok(
+            $"已在 {app.DisplayName} 重新搜索并核对联系人“{recipient}”，清除旧草稿后填入 {message.Length} 个字符。消息尚未发送。确认编号：{confirmationId}。请让用户先在屏幕上核对，并在后续单独明确说“确认发送”；两分钟内仅可确认一次。");
+    }
+
+    private async Task<ToolExecutionResult> ConfirmChatSendAsync(
+        string confirmationId,
+        CancellationToken cancellationToken)
+    {
+        var pending = _pendingChatSend;
+        if (pending is null)
+        {
+            return ToolExecutionResult.Fail("当前没有待确认消息。请先调用 windows.prepare_chat_message 重新搜索联系人并准备消息。");
+        }
+        if (!pending.ConfirmationId.Equals(confirmationId.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return ToolExecutionResult.Fail("确认编号不匹配，未发送消息。请使用最近一次准备消息返回的编号。");
+        }
+        if (DateTimeOffset.Now - pending.CreatedAt > TimeSpan.FromMinutes(2))
+        {
+            _pendingChatSend = null;
+            return ToolExecutionResult.Fail("消息确认已经超过两分钟并失效，未发送。请重新搜索联系人并准备消息。");
+        }
+
+        foreach (var request in new[]
+                 {
+                     (PermissionKeys.Keyboard, $"确认发送 {pending.AppDisplayName} 消息"),
+                     (PermissionKeys.ScreenRecognition, "发送前再次核对联系人和草稿"),
+                     (PermissionKeys.Mouse, "聚焦草稿或点击发送按钮")
+                 })
+        {
+            var denied = await EnsureAutomationPermissionAsync(
+                request.Item1,
+                request.Item2,
+                cancellationToken);
+            if (denied is { } failure)
+            {
+                return failure;
+            }
+        }
+
+        if (!ScreenRecognitionService.IsWindowAvailable(pending.WindowHandle)
+            || !EnsureExactTargetIsForeground(pending.WindowHandle, pending.ProcessNames))
+        {
+            _pendingChatSend = null;
+            return ToolExecutionResult.Fail($"原 {pending.AppDisplayName} 会话窗口已经关闭或无法恢复；确认已作废，消息未发送。");
+        }
+        if (!ScreenRecognitionService.TryGetWindowBounds(pending.WindowHandle, out var currentBounds)
+            || !ScreenRecognitionService.WindowBoundsMatch(pending.WindowBounds, currentBounds))
+        {
+            _pendingChatSend = null;
+            return ToolExecutionResult.Fail("准备消息后聊天窗口的位置或大小发生变化；确认已作废，消息未发送。");
+        }
+
+        await Task.Delay(180, cancellationToken);
+        var current = await ScreenRecognitionService.InspectWindowAsync(
+            pending.WindowHandle,
+            80,
+            cancellationToken);
+        var header = ScreenAutomationHeuristics.FindConversationHeader(
+            current,
+            pending.Recipient,
+            pending.HeaderBounds);
+        var draft = ScreenAutomationHeuristics.FindTypedMessage(
+            current,
+            pending.Message,
+            pending.MessageBounds);
+        if (header is null || draft is null)
+        {
+            _pendingChatSend = null;
+            return ToolExecutionResult.Fail(
+                "发送前复核发现联系人或草稿与准备时不一致，确认已作废且没有发送。请重新准备消息。");
+        }
+
+        ToolExecutionResult sendResult;
+        var sendButton = ScreenAutomationHeuristics.FindSendButton(current);
+        if (sendButton is not null)
+        {
+            var refreshedButton = await ScreenRecognitionService.RefreshItemAsync(
+                current,
+                sendButton,
+                cancellationToken);
+            if (refreshedButton is null || !ScreenRecognitionService.IsExactForegroundWindow(pending.WindowHandle))
+            {
+                _pendingChatSend = null;
+                return ToolExecutionResult.Fail("发送按钮在最终复核时发生变化，确认已作废且没有发送。");
+            }
+            var buttonPoint = new Point(
+                refreshedButton.Bounds.Left + refreshedButton.Bounds.Width / 2,
+                refreshedButton.Bounds.Top + refreshedButton.Bounds.Height / 2);
+            var moveResult = MoveMouse(buttonPoint.X, buttonPoint.Y);
+            if (!moveResult.Success || !ScreenRecognitionService.IsExactForegroundWindow(pending.WindowHandle))
+            {
+                _pendingChatSend = null;
+                return ToolExecutionResult.Fail("鼠标未能安全到达发送按钮，确认已作废且没有发送。");
+            }
+
+            // Consume before the one physical send action so retries can never
+            // duplicate the message, even if Windows reports a partial failure.
+            _pendingChatSend = null;
+            sendResult = SendMouseButton("left", 1);
+        }
+        else
+        {
+            var focusResult = await ClickRecognizedItemAsync(current, draft, 1, cancellationToken);
+            if (!focusResult.Success || !ScreenRecognitionService.IsExactForegroundWindow(pending.WindowHandle))
+            {
+                _pendingChatSend = null;
+                return ToolExecutionResult.Fail("无法在最终复核后重新聚焦消息草稿，确认已作废且没有发送。");
+            }
+            _pendingChatSend = null;
+            sendResult = PressHotkey("enter");
+        }
+
+        if (!sendResult.Success)
+        {
+            return ToolExecutionResult.Fail(
+                $"Windows 没有确认完成发送动作：{sendResult.Message} 为防止重复发送，确认编号已经作废；请先查看聊天窗口，确需重试时重新准备。");
+        }
+
+        _log($"已确认向 {pending.AppDisplayName} 联系人 {pending.Recipient} 发送一次（{pending.Message.Length} 个字符，内容未写入日志）。");
+        return ToolExecutionResult.Ok(
+            $"已再次核对 {pending.AppDisplayName} 联系人“{pending.Recipient}”和草稿内容，并只执行一次发送。确认编号已使用，重复确认不会再次发送。");
     }
 
     private async Task<ToolExecutionResult> NewNotepadDocumentAsync(

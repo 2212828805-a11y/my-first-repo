@@ -27,7 +27,9 @@
 | `windows.list_apps` | 列出允许操作的应用 | 开启 |
 | `windows.open_app` | 打开白名单应用 | 开启 |
 | `windows.close_app` | 请求白名单应用正常关闭 | 开启 |
-| `windows.app_action` | 应用搜索、微信/QQ 发消息、记事本新建与写入、媒体控制 | 开启（需要时弹出键盘授权） |
+| `windows.app_action` | 应用搜索、微信/QQ 消息准备、记事本新建与写入、媒体控制 | 开启（需要时弹出授权） |
+| `windows.prepare_chat_message` | 重新搜索并核对 QQ/微信联系人，只填入消息、不发送 | 需要键盘、识屏和鼠标授权 |
+| `windows.confirm_chat_send` | 用户后续明确确认后复核并发送一次 | 需要准备步骤返回的一次性编号 |
 | `windows.netease_music_task` | 连续完成网易云客户端打开、搜索、识屏和播放第 N 个结果 | 按动作请求键盘、识屏和鼠标授权 |
 | `windows.diagnose_apps` | 检查应用路径和运行窗口，不读取聊天内容或 Token | 开启 |
 | `windows.open_url` | 打开 http/https 网页 | 开启 |
@@ -35,6 +37,7 @@
 | `windows.media_control` | 音量、静音、播放暂停、切歌 | 开启 |
 | `windows.type_text` | 向当前输入框键入文字 | 首次调用弹窗授权 |
 | `windows.hotkey` | 按下受支持的快捷键 | 首次调用弹窗授权 |
+| `windows.verified_screen_search` | 先输入并核对搜索词，再按画面选择点击按钮或回车 | 需要键盘、识屏和鼠标授权 |
 | `windows.cursor_position` | 读取鼠标位置 | 首次调用弹窗授权 |
 | `windows.move_mouse` | 移动鼠标 | 首次调用弹窗授权 |
 | `windows.click` | 单击或双击鼠标 | 首次调用弹窗授权 |
@@ -51,8 +54,8 @@
 - “路遥，打开记事本。”
 - “新建一个记事本，写入今天的待办事项。”
 - “打开 Edge，搜索郑州明天的天气。”
-- 开启微信和键盘权限后：“用微信给文件传输助手发送：测试完成。”
-- 开启 QQ 和键盘权限后：“用 QQ 给我的手机发送：测试完成。”
+- 开启微信及所需权限后：“用微信给文件传输助手准备消息：测试完成。”在屏幕核对无误后，后续单独说：“确认发送。”
+- 开启 QQ 及所需权限后：“用 QQ 给我的手机准备消息：测试完成。”换联系人时会重新搜索；核对无误后再单独说：“确认发送。”
 - 开启网易云音乐和所需权限后：“打开网易云音乐。”、“在网易云搜索晴天并播放第二个结果。”、“暂停网易云音乐。”
 - 当前桌面或菜单显示软件名称时：“打开屏幕上的微信。”同名项目不唯一时，路遥会先返回位置供选择，不会猜测。
 - “在网页搜索抖音美食视频，然后打开第二个视频。”搜索完成后路遥会先识别结果，再按编号单击。
@@ -67,13 +70,15 @@
 当用户要求操作 Windows 电脑时，优先使用 windows.* 工具。
 打开应用前，如果不确定别名，先调用 windows.list_apps。
 任何鼠标、键盘操作都应先确认目标窗口，禁止猜测坐标。
+所有可见搜索框都应优先调用 windows.verified_screen_search，或使用带相同核对流程的应用专用工具：先聚焦输入框并输入，OCR 核对搜索词无误后，屏幕有唯一搜索按钮就点击，否则才按回车；禁止先提交再输入。
+QQ/微信消息必须先调用 windows.prepare_chat_message；该工具只填入不发送。不得在同一条用户请求中调用 windows.confirm_chat_send。只有用户在后续消息中明确说“确认发送”时，才使用最近的一次性确认编号发送一次。
 网易云请求始终优先调用 windows.netease_music_task；不要使用 windows.web_search。只有用户明确要求“用网页/浏览器搜索网易云”时才能使用网页搜索并设置 force_browser=true。
 其他网页结果需要点击时，先调用 windows.inspect_screen，再根据返回的标题文字编号调用 windows.click_screen_item。需要打开当前画面中的软件名称时，调用 windows.open_screen_text。
 ```
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.5.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.5.2.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -111,9 +116,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.5.1` 的标签。
+- 推送形如 `v0.5.2` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.5.1` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.5.2` artifact 即可。
 
 ## 默认应用列表
 
@@ -121,11 +126,13 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 
 Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名，但默认关闭。安装后先在“应用管理”中点击“自动检测路径”，再勾选需要的应用。程序会检查正在运行的进程、Windows 注册表和常见安装目录；仍未找到时再双击对应行选择实际 `.exe` 路径。
 
-微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，QQ 兼容新版 QQNT 常见安装目录；两者均支持激活、搜索联系人和发送消息。网易云音乐优先直接启动真实程序，避免自定义协议确认页，并支持搜索、播放/暂停、上一首和下一首。首次需要键盘或鼠标时，电脑会弹出授权窗口，可选择“仅本次连接”或“始终允许”。
+微信兼容新版 `Weixin.exe` 和旧版 `WeChat.exe`，QQ 兼容新版 QQNT 常见安装目录；两者均支持激活、重新搜索并核对联系人、准备消息和二次确认发送。网易云音乐优先直接启动真实程序，避免自定义协议确认页，并支持搜索、播放/暂停、上一首和下一首。首次需要键盘、鼠标或屏幕文字识别时，电脑会弹出授权窗口，可选择“仅本次连接”或“始终允许”。
 
 0.5.0 在 0.4.1 的 64 位键鼠修复和真实自检基础上新增本机 OCR 屏幕文字识别。搜索结果显示后，`windows.inspect_screen` 会在内存中截取当前前台窗口并返回带编号的文字；`windows.click_screen_item` 会在 90 秒内再次核对同一窗口、窗口位置和目标文字，再移动鼠标完成单击或双击。截图不会保存到磁盘或上传，只有识别出的文字会返回给当前连接的路遥。页面滚动、窗口移动、文字消失或目标窗口改变时，程序会拒绝点击并要求重新识别。
 
 0.5.1 增加 `windows.netease_music_task`，把网易云的打开、搜索、识别结果与双击播放合并为一个连续任务；普通网页搜索会主动拒绝误接网易云应用请求。`windows.open_screen_text` 可在当前画面中查找指定软件文字并执行打开操作；多个同名结果必须明确选择序号，点击前仍会再次核对窗口、位置和文字。
+
+0.5.2 统一修正可见搜索流程：先聚焦输入框、输入并 OCR 核对搜索词，再根据屏幕是否存在唯一独立搜索按钮决定鼠标点击或回车。QQ 和微信消息改为两步操作：每次换人都会重新搜索唯一联系人并核对会话标题，只清除旧草稿和填入新消息；用户后续明确“确认发送”后，程序再次核对联系人与草稿并只发送一次。确认编号两分钟失效且不可重复使用。
 
 应用配置和加密后的 MCP 地址保存在：
 

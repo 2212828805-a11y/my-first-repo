@@ -39,14 +39,26 @@ internal static class ToolCatalog
                     OptionalInteger("result_number", "search_and_play 要播放搜索结果中的第几个，默认 1，范围 1 到 20。", 1, 20))));
             tools.Add(Tool(
                 "windows.app_action",
-                "对指定白名单应用执行动作。支持窗口激活、应用内搜索、微信或 QQ 发消息、记事本新建与写入，以及媒体播放控制。网易云相关请求应改用 windows.netease_music_task，以保证打开、搜索和播放动作连续完成。键盘未授权时会先在电脑上弹出授权窗口；输入前会确认目标应用仍在前台。",
+                "对指定白名单应用执行动作。search 会先聚焦输入框、输入并用屏幕核对搜索词，再根据画面决定点击搜索按钮或按回车。send_message 是兼容入口，现在只会重新搜索并核对微信/QQ 联系人、清除旧草稿并填入消息，不会发送；真正发送必须在用户后续单独明确确认后调用 windows.confirm_chat_send。网易云相关请求应改用 windows.netease_music_task。",
                 Properties(
                     Required("app", "string", "应用别名，例如 wechat、qq、netease_music、notepad。"),
                     RequiredEnum("action", "应用动作。", "activate", "search", "send_message", "new_document", "write_text", "new_and_write", "play_pause", "previous", "next"),
-                    Optional("query", "string", "search 动作的搜索关键词，其他动作省略。"),
-                    Optional("recipient", "string", "send_message 动作的微信或 QQ 联系人名称。"),
-                    Optional("message", "string", "send_message 动作要发送的消息，最长 1000 个字符。"),
+                    Optional("query", "string", "search 动作的搜索关键词；输入后必须先通过屏幕核对，再提交。"),
+                    Optional("recipient", "string", "send_message 准备动作的微信或 QQ 联系人名称；每次都会重新搜索和核对。"),
+                    Optional("message", "string", "send_message 准备动作要填入的消息，最长 1000 个字符；本调用不会发送。"),
                     Optional("text", "string", "write_text 或 new_and_write 动作写入记事本的内容。"))));
+            tools.Add(Tool(
+                "windows.prepare_chat_message",
+                "为 QQ 或微信准备消息。每次都会重新识别搜索框，先输入并核对联系人名称，再点击唯一匹配联系人；随后核对会话标题、清除旧草稿并填入新消息。绝不按发送键，返回一次性 confirmation_id。不要在同一条用户请求中自动调用确认工具。",
+                Properties(
+                    RequiredEnum("app", "聊天应用。", "qq", "wechat"),
+                    Required("recipient", "string", "联系人准确显示名称，最长 80 个字符。"),
+                    Required("message", "string", "只填入而不发送的单行消息，最长 1000 个字符。"))));
+            tools.Add(Tool(
+                "windows.confirm_chat_send",
+                "确认并发送最近一次准备好的 QQ 或微信消息。只有用户在准备完成后的后续消息中单独明确说“确认发送”时才能调用；严禁与 prepare_chat_message 在同一用户请求中连续调用。发送前会再次识别联系人标题和草稿，只执行一次；编号两分钟过期且使用后不能重复。",
+                Properties(
+                    Required("confirmation_id", "string", "windows.prepare_chat_message 返回的最近一次确认编号。"))));
             tools.Add(Tool(
                 "windows.diagnose_apps",
                 "只读检查白名单应用的配置路径、自动发现路径、运行进程和可用动作。不会读取聊天内容或 MCP Token。",
@@ -79,6 +91,11 @@ internal static class ToolCatalog
             "在当前窗口按下键盘快捷键。未授权时会先弹出授权窗口。",
             Properties(
                 Required("keys", "string", "使用加号连接的快捷键，例如 ctrl+shift+s。"))));
+        tools.Add(Tool(
+            "windows.verified_screen_search",
+            "适配当前前台应用或网页的可见搜索框。程序会先识别并聚焦输入框，再输入搜索词并用屏幕 OCR 核对；核对无误后，若屏幕存在唯一独立的“搜索/查找”按钮就移动光标单击，否则在已聚焦搜索框中按回车。绝不在输入搜索词之前提交。需要键盘、鼠标和屏幕文字识别授权。",
+            Properties(
+                Required("query", "string", "要输入、核对并提交的单行搜索词，最长 200 个字符。"))));
 
         tools.Add(Tool(
             "windows.cursor_position",
