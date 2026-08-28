@@ -20,17 +20,19 @@ internal static class Program
         if (Environment.GetCommandLineArgs().Any(argument =>
                 argument.Equals("--self-test-screen-recognition", StringComparison.OrdinalIgnoreCase)))
         {
+            var reportPath = Path.Combine(Path.GetTempPath(), "looy-ocr-self-test.txt");
             try
             {
-                Environment.ExitCode = ScreenRecognitionService
+                var report = ScreenRecognitionService
                     .RunComponentSelfTestAsync()
                     .GetAwaiter()
-                    .GetResult()
-                    ? 0
-                    : 87;
+                    .GetResult();
+                File.WriteAllText(reportPath, report);
+                Environment.ExitCode = 0;
             }
-            catch
+            catch (Exception exception)
             {
+                File.WriteAllText(reportPath, exception.ToString());
                 Environment.ExitCode = 87;
             }
             return;
