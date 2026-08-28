@@ -98,6 +98,13 @@ internal sealed class WindowsController
                 "windows.close_app" => RequirePermission(
                     PermissionKeys.Applications,
                     () => CloseApp(RequiredString(arguments, "app"))),
+                "windows.netease_music_task" => !_permissionEnabled(PermissionKeys.Applications)
+                    ? ToolExecutionResult.Fail("用户尚未授权应用操作。")
+                    : await NeteaseMusicTaskAsync(
+                        RequiredString(arguments, "action"),
+                        OptionalString(arguments, "query", string.Empty),
+                        OptionalInt(arguments, "result_number", 1),
+                        cancellationToken),
                 "windows.app_action" => !_permissionEnabled(PermissionKeys.Applications)
                     ? ToolExecutionResult.Fail("用户尚未在路遥智控中授权此项操作。")
                     : await AppActionAsync(
@@ -116,7 +123,8 @@ internal sealed class WindowsController
                     PermissionKeys.Web,
                     () => WebSearch(
                         RequiredString(arguments, "query"),
-                        OptionalString(arguments, "engine", "baidu"))),
+                        OptionalString(arguments, "engine", "baidu"),
+                        OptionalBool(arguments, "force_browser", false))),
                 "windows.type_text" => await RequireInputPermissionAsync(
                     PermissionKeys.Keyboard,
                     "向当前窗口输入文字",
@@ -149,6 +157,11 @@ internal sealed class WindowsController
                     cancellationToken),
                 "windows.inspect_screen" => await InspectScreenAsync(
                     OptionalInt(arguments, "max_items", 60),
+                    cancellationToken),
+                "windows.open_screen_text" => await OpenScreenTextAsync(
+                    RequiredString(arguments, "text"),
+                    OptionalInt(arguments, "occurrence", 0),
+                    OptionalInt(arguments, "clicks", 0),
                     cancellationToken),
                 "windows.click_screen_item" => await ClickScreenItemAsync(
                     RequiredString(arguments, "snapshot_id"),
@@ -281,6 +294,99 @@ internal sealed class WindowsController
             "下一步：根据用户要求选中标题等唯一文字，再调用 windows.click_screen_item。抖音视频通常单击，网易云歌曲通常双击；不要选择“播放”“关注”等重复通用文字。快照 90 秒后失效。");
         return ToolExecutionResult.Ok(message);
     }
+
+    private async Task<ToolExecutionResult> OpenScreenTextAsync(
+        string text,
+        int occurrence,
+        int requestedClicks,
+        CancellationToken cancellationToken)
+    {
+        var targetText = text.Trim();
+        if (targetText.Length is < 1 or > 100)
+        {
+            return ToolExecutionResult.Fail("要打开的屏幕文字不能为空且不能超过 100 个字符。");
+        }
+        if (occurrence is < 0 or > 20)
+        {
+            return ToolExecutionResult.Fail("同名结果序号必须是 1 到 20；没有同名结果时请省略 occurrence。");
+        }
+        if (requestedClicks is not 0 and not 1 and not 2)
+        {
+            return ToolExecutionResult.Fail("点击次数只能是 1 或 2；需要自动判断时请省略 clicks。");
+        }
+
+        var inspection = await InspectScreenAsync(80, cancellationToken);
+        if (!inspection.Success || _screenSnapshot is null)
+        {
+            return inspection;
+        }
+
+        var snapshot = _screenSnapshot;
+        var normalizedTarget = NormalizeVisibleText(targetText);
+        var exactMatches = snapshot.Items
+            .Where(item => NormalizeVisibleText(item.Text).Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.Bounds.Top)
+            .ThenBy(item => item.Bounds.Left)
+            .ToArray();
+        var matches = exactMatches.Length > 0
+            ? exactMatches
+            : snapshot.Items
+                .Where(item =>
+                {
+                    var candidate = NormalizeVisibleText(item.Text);
+                    return candidate.Length >= 2
+                           && (candidate.Contains(normalizedTarget, StringComparison.OrdinalIgnoreCase)
+                               || normalizedTarget.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+                })
+                .OrderBy(item => item.Bounds.Top)
+                .ThenBy(item => item.Bounds.Left)
+                .ToArray();
+
+        if (matches.Length == 0)
+        {
+            return ToolExecutionResult.Fail(
+                $"当前画面没有识别到“{targetText}”。请确认文字完整可见。识别结果如下：{Environment.NewLine}{inspection.Message}");
+        }
+        if (matches.Length > 1 && occurrence == 0)
+        {
+            var choices = string.Join(
+                Environment.NewLine,
+                matches.Select((item, index) => $"同名 {index + 1}：[屏幕编号 {item.Index}] {item.Text}"));
+            return ToolExecutionResult.Fail(
+                $"当前画面有 {matches.Length} 个与“{targetText}”匹配的文字，为避免打开错误项目，没有猜测。请根据下列位置重新调用并提供 occurrence：{Environment.NewLine}{choices}");
+        }
+
+        var matchIndex = occurrence == 0 ? 0 : occurrence - 1;
+        if (matchIndex < 0 || matchIndex >= matches.Length)
+        {
+            return ToolExecutionResult.Fail($"只找到 {matches.Length} 个“{targetText}”匹配项，没有第 {occurrence} 个。");
+        }
+
+        var selected = matches[matchIndex];
+        var clicks = requestedClicks == 0
+            ? DefaultOpenClickCount(snapshot.ProcessName)
+            : requestedClicks;
+        var clickResult = await ClickScreenItemAsync(snapshot.Id, selected.Index, clicks, cancellationToken);
+        if (!clickResult.Success)
+        {
+            return clickResult;
+        }
+
+        return ToolExecutionResult.Ok(
+            $"已识别并{(clicks == 2 ? "双击" : "单击")}屏幕文字“{selected.Text}”，向 Windows 发出打开请求。");
+    }
+
+    private static int DefaultOpenClickCount(string processName)
+    {
+        return processName.Equals("StartMenuExperienceHost", StringComparison.OrdinalIgnoreCase)
+               || processName.Equals("SearchHost", StringComparison.OrdinalIgnoreCase)
+               || processName.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase)
+            ? 1
+            : 2;
+    }
+
+    private static string NormalizeVisibleText(string text) =>
+        string.Concat(text.Where(character => !char.IsWhiteSpace(character))).Trim();
 
     private async Task<ToolExecutionResult> ClickScreenItemAsync(
         string snapshotId,
@@ -508,6 +614,115 @@ internal sealed class WindowsController
 
         _log($"已请求关闭应用：{app.DisplayName}");
         return ToolExecutionResult.Ok($"已请求 {app.DisplayName} 正常关闭，共 {requested} 个窗口。");
+    }
+
+    private async Task<ToolExecutionResult> NeteaseMusicTaskAsync(
+        string action,
+        string query,
+        int resultNumber,
+        CancellationToken cancellationToken)
+    {
+        var app = ResolveApp("netease_music");
+        if (app is null)
+        {
+            return ToolExecutionResult.Fail(
+                "网易云音乐桌面应用尚未在“应用管理”中启用。请先自动检测路径并勾选网易云音乐；不要改用浏览器搜索代替。");
+        }
+
+        var normalizedAction = action.Trim().ToLowerInvariant();
+        if (normalizedAction == "open")
+        {
+            return (await ActivateAppWindowAsync(app, cancellationToken)).Result;
+        }
+        if (normalizedAction is "play_pause" or "previous" or "next")
+        {
+            return await AppActionAsync(
+                app.Alias,
+                normalizedAction,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                cancellationToken);
+        }
+        if (normalizedAction is not "search" and not "search_and_play")
+        {
+            return ToolExecutionResult.Fail("网易云任务只支持 open、search、search_and_play、play_pause、previous 或 next。");
+        }
+        if (string.IsNullOrWhiteSpace(query) || query.Trim().Length > 200)
+        {
+            return ToolExecutionResult.Fail("网易云搜索关键词不能为空且不能超过 200 个字符。");
+        }
+        if (normalizedAction == "search_and_play" && resultNumber is < 1 or > 20)
+        {
+            return ToolExecutionResult.Fail("要播放的搜索结果序号必须是 1 到 20。");
+        }
+
+        var searchResult = await AppActionAsync(
+            app.Alias,
+            "search",
+            query.Trim(),
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            cancellationToken);
+        if (!searchResult.Success || normalizedAction == "search")
+        {
+            return searchResult;
+        }
+
+        var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
+        var processNames = InstalledAppResolver.GetProcessNames(app, resolvedTarget);
+        var handle = FindMainWindow(processNames);
+        if (handle == IntPtr.Zero)
+        {
+            return ToolExecutionResult.Fail("已经提交网易云搜索，但没有找到可继续操作的网易云窗口。请等待应用显示后重试。");
+        }
+
+        ToolExecutionResult lastInspection = default;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            await Task.Delay(attempt == 0 ? 1600 : 900, cancellationToken);
+            if (!EnsureExactTargetIsForeground(handle, processNames))
+            {
+                return ToolExecutionResult.Fail("网易云搜索后窗口没有保持在前台，已停止后续点击，避免操作错误窗口。");
+            }
+
+            lastInspection = await InspectScreenAsync(80, cancellationToken);
+            if (!lastInspection.Success || _screenSnapshot is null)
+            {
+                if (attempt == 2)
+                {
+                    return ToolExecutionResult.Fail($"已经在网易云中搜索“{query.Trim()}”，但屏幕识别未完成：{lastInspection.Message}");
+                }
+                continue;
+            }
+
+            var snapshot = _screenSnapshot;
+            var resultItem = NeteaseMusicAutomation.FindResultItem(snapshot, resultNumber, query.Trim());
+            if (resultItem is null)
+            {
+                continue;
+            }
+
+            var clickResult = await ClickScreenItemAsync(
+                snapshot.Id,
+                resultItem.Index,
+                2,
+                cancellationToken);
+            if (!clickResult.Success)
+            {
+                return ToolExecutionResult.Fail(
+                    $"已经在网易云中搜索“{query.Trim()}”，但播放第 {resultNumber} 个结果时停止：{clickResult.Message}");
+            }
+
+            _log($"网易云连续任务完成：搜索并播放第 {resultNumber} 个结果；搜索词未写入额外诊断文件。");
+            return ToolExecutionResult.Ok(
+                $"已打开网易云音乐，在客户端中搜索“{query.Trim()}”，并双击播放第 {resultNumber} 个搜索结果。");
+        }
+
+        return ToolExecutionResult.Fail(
+            $"已打开网易云音乐并搜索“{query.Trim()}”，但无法可靠判断第 {resultNumber} 个歌曲结果，因此没有猜测点击。最近一次识别结果：{lastInspection.Message}");
     }
 
     private async Task<ToolExecutionResult> AppActionAsync(
@@ -1153,11 +1368,16 @@ internal sealed class WindowsController
         return ToolExecutionResult.Ok($"已在默认浏览器打开：{uri.Host}");
     }
 
-    private static ToolExecutionResult WebSearch(string query, string engine)
+    private static ToolExecutionResult WebSearch(string query, string engine, bool forceBrowser)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
             return ToolExecutionResult.Fail("搜索内容不能为空。");
+        }
+        if (NeteaseMusicAutomation.ShouldRejectWebSearch(query, forceBrowser))
+        {
+            return ToolExecutionResult.Fail(
+                "检测到这是网易云音乐应用请求，已阻止打开浏览器。请改用 windows.netease_music_task；只有用户明确要求网页搜索时才设置 force_browser=true。");
         }
 
         var encodedQuery = Uri.EscapeDataString(query.Trim());
@@ -1521,6 +1741,15 @@ internal sealed class WindowsController
     private static int OptionalInt(JsonElement arguments, string property, int defaultValue)
     {
         return TryGetInt(arguments, property, out var value) ? value : defaultValue;
+    }
+
+    private static bool OptionalBool(JsonElement arguments, string property, bool defaultValue)
+    {
+        return arguments.ValueKind == JsonValueKind.Object
+               && arguments.TryGetProperty(property, out var value)
+               && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : defaultValue;
     }
 
     private static bool TryGetInt(JsonElement arguments, string property, out int value)
