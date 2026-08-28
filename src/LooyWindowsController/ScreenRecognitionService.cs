@@ -193,8 +193,7 @@ internal static class ScreenRecognitionService
             20,
             CancellationToken.None);
         var text = string.Join(" | ", recognized.Items.Select(item => item.Text));
-        if (!recognized.Items.Any(item =>
-                NormalizeText(item.Text).Contains("LOOY", StringComparison.OrdinalIgnoreCase)))
+        if (!recognized.Items.Any(item => NormalizeText(item.Text).Contains("12345", StringComparison.Ordinal)))
         {
             throw new InvalidOperationException(
                 $"OCR 已运行但没有识别出测试文字。语言：{recognized.Language}；结果：{text}");
