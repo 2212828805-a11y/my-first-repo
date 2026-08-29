@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $resolvedAssembly = [System.IO.Path]::GetFullPath($AssemblyPath)
+$resolvedMarker = [System.IO.Path]::GetFullPath($MarkerPath)
 $inputDirectory = [System.IO.Path]::GetDirectoryName($resolvedAssembly)
 $assemblyName = [System.IO.Path]::GetFileName($resolvedAssembly)
 $workDirectory = Join-Path $inputDirectory "looy-obfuscation"
@@ -69,8 +70,12 @@ if (-not (Test-Path -LiteralPath $protectedAssembly -PathType Leaf)) {
 }
 
 Copy-Item -LiteralPath $protectedAssembly -Destination $resolvedAssembly -Force
+$markerDirectory = [System.IO.Path]::GetDirectoryName($resolvedMarker)
+if (-not [string]::IsNullOrWhiteSpace($markerDirectory)) {
+    [System.IO.Directory]::CreateDirectory($markerDirectory) | Out-Null
+}
 [System.IO.File]::WriteAllText(
-    [System.IO.Path]::GetFullPath($MarkerPath),
+    $resolvedMarker,
     "Obfuscar 2.2.50`n$([DateTimeOffset]::UtcNow.ToString('O'))`n",
     [System.Text.UTF8Encoding]::new($false))
 Write-Host "Protected release assembly: $assemblyName"

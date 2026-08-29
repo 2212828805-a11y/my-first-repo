@@ -37,6 +37,6 @@
     Outputs="$(IntermediateOutputPath)looy-release-protected.marker">
     <Exec
       WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
-      Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\protect-release.ps1&quot; -AssemblyPath &quot;$(TargetPath)&quot; -MarkerPath &quot;$(IntermediateOutputPath)looy-release-protected.marker&quot;" />
+      Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\protect-release.ps1&quot; -AssemblyPath &quot;$(TargetPath)&quot; -MarkerPath &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)looy-release-protected.marker&quot;" />
   </Target>
 </Project>
