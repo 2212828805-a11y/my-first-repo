@@ -49,6 +49,34 @@ internal static class ScreenAutomationHeuristics
             .FirstOrDefault();
     }
 
+    public static ScreenTextItem? FindTypedSearchTextInTopRegion(
+        ScreenSnapshot snapshot,
+        string query)
+    {
+        var normalizedQuery = Normalize(query);
+        if (normalizedQuery.Length == 0)
+        {
+            return null;
+        }
+
+        // QQ/微信/网易云的 Ctrl+F 会直接把焦点放进应用自己的
+        // 搜索框。此时旧关键词会替换掉“搜索”占位文字，所以只能
+        // 在输入后按位置核对，而不能继续依赖占位文字。
+        // Keep this deliberately above the first contact/result row. Seeing the
+        // requested name in a result list is not proof that the input focus was
+        // in the search box.
+        var topLimit = snapshot.WindowBounds.Top + (int)(snapshot.WindowBounds.Height * 0.18);
+        var horizontalPadding = Math.Max(16, (int)(snapshot.WindowBounds.Width * 0.02));
+        return snapshot.Items
+            .Where(item => CenterY(item.Bounds) <= topLimit)
+            .Where(item => item.Bounds.Left >= snapshot.WindowBounds.Left + horizontalPadding)
+            .Where(item => item.Bounds.Right <= snapshot.WindowBounds.Right - horizontalPadding)
+            .Where(item => TextMatches(item.Text, normalizedQuery, minimumPartialLength: 4))
+            .OrderBy(item => item.Bounds.Top)
+            .ThenBy(item => item.Bounds.Left)
+            .FirstOrDefault();
+    }
+
     public static ScreenTextItem? FindSearchSubmitButton(
         ScreenSnapshot snapshot,
         ScreenTextItem typedQuery,
@@ -249,9 +277,19 @@ internal static class ScreenAutomationHeuristics
             ]
         };
         var typed = FindTypedSearchText(results, "小明", field.Bounds);
+        var typedFromShortcut = FindTypedSearchTextInTopRegion(results, "小明");
+        var resultOnly = initial with
+        {
+            Id = "result-only",
+            Items = [new ScreenTextItem(1, "小明", new Rectangle(65, 170, 120, 30))]
+        };
         var submit = typed is null ? null : FindSearchSubmitButton(results, typed, field.Bounds);
         var contact = FindRecipientResult(results, "小明", field.Bounds);
-        if (typed?.Index != 1 || submit?.Index != 3 || contact?.Index != 2)
+        if (typed?.Index != 1
+            || typedFromShortcut?.Index != 1
+            || FindTypedSearchTextInTopRegion(resultOnly, "小明") is not null
+            || submit?.Index != 3
+            || contact?.Index != 2)
         {
             return false;
         }

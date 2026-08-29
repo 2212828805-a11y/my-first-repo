@@ -11,6 +11,7 @@ on:
       - main
       - fix/chat-confirm-v0.5.2
       - feature/source-controls-v0.6.0
+      - fix/control-smoothness-v0.6.1
     tags:
       - "v*"
 
@@ -130,8 +131,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.6.0
+          name: LooyWindowsController-Windows-v0.6.1
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.6.0.exe
+            dist/installer/LooyWindowsController-Setup-0.6.1.exe
           if-no-files-found: error

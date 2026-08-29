@@ -31,6 +31,9 @@ internal sealed class WindowsController
     private readonly SettingsStore _settingsStore;
     private readonly Action<string> _log;
     private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private readonly object _traceGate = new();
+    private readonly Queue<string> _recentActionTrace = new();
+    private readonly Dictionary<string, SearchFieldHint> _searchFieldHints = new(StringComparer.OrdinalIgnoreCase);
     private ScreenSnapshot? _screenSnapshot;
     private PendingChatSend? _pendingChatSend;
     private PendingPowerAction? _pendingPowerAction;
@@ -58,6 +61,11 @@ internal sealed class WindowsController
         ScreenSnapshot Snapshot,
         ScreenTextItem OriginalField,
         ScreenTextItem TypedQuery);
+
+    private sealed record SearchFieldHint(
+        double RelativeX,
+        double RelativeY,
+        DateTimeOffset CreatedAt);
 
     internal static bool IsNativeInputLayoutValid =>
         Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
@@ -95,6 +103,7 @@ internal sealed class WindowsController
         _screenSnapshot = null;
         _pendingChatSend = null;
         _pendingPowerAction = null;
+        _searchFieldHints.Clear();
     }
 
     public WindowsController(
@@ -117,9 +126,10 @@ internal sealed class WindowsController
         CancellationToken cancellationToken)
     {
         await _actionLock.WaitAsync(cancellationToken);
+        var timer = Stopwatch.StartNew();
         try
         {
-            return toolName switch
+            var result = toolName switch
             {
                 "windows.system_status" => RequirePermission(PermissionKeys.SystemStatus, GetSystemStatus),
                 "windows.resource_status" => RequirePermission(
@@ -252,23 +262,59 @@ internal sealed class WindowsController
                 "windows.screenshot" => RequirePermission(PermissionKeys.Screenshot, TakeScreenshot),
                 _ => ToolExecutionResult.Fail($"未知工具：{toolName}")
             };
+            RecordActionTrace(toolName, result, timer.Elapsed);
+            return result;
         }
         catch (OperationCanceledException)
         {
-            return ToolExecutionResult.Fail("操作已取消。");
+            var result = ToolExecutionResult.Fail("操作已取消。");
+            RecordActionTrace(toolName, result, timer.Elapsed);
+            return result;
         }
         catch (ArgumentException exception)
         {
-            return ToolExecutionResult.Fail(exception.Message);
+            var result = ToolExecutionResult.Fail(exception.Message);
+            RecordActionTrace(toolName, result, timer.Elapsed);
+            return result;
         }
         catch (Exception exception)
         {
             _log($"工具执行失败 [{toolName}]：{exception.Message}");
-            return ToolExecutionResult.Fail($"执行失败：{exception.Message}");
+            var result = ToolExecutionResult.Fail($"执行失败：{exception.Message}");
+            RecordActionTrace(toolName, result, timer.Elapsed);
+            return result;
         }
         finally
         {
             _actionLock.Release();
+        }
+    }
+
+    private void RecordActionTrace(
+        string toolName,
+        ToolExecutionResult result,
+        TimeSpan elapsed)
+    {
+        var foregroundHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        var foregroundProcess = foregroundHandle == IntPtr.Zero
+            ? "无"
+            : ScreenRecognitionService.GetProcessName(foregroundHandle);
+        var summary = result.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (summary.Length > 320)
+        {
+            summary = summary[..320] + "…";
+        }
+
+        var line = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] "
+                   + $"{toolName} | {(result.Success ? "成功" : "停止")} | {elapsed.TotalMilliseconds:F0} ms "
+                   + $"| 前台={foregroundProcess} | {summary}";
+        lock (_traceGate)
+        {
+            _recentActionTrace.Enqueue(line);
+            while (_recentActionTrace.Count > 80)
+            {
+                _recentActionTrace.Dequeue();
+            }
         }
     }
 
@@ -578,38 +624,66 @@ internal sealed class WindowsController
             return (ToolExecutionResult.Fail($"{displayName} 没有保持在前台，已停止搜索。"), null);
         }
 
-        await Task.Delay(180, cancellationToken);
+        await Task.Delay(120, cancellationToken);
         var initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
         var searchField = ScreenAutomationHeuristics.FindSearchField(initial);
-        if (searchField is null)
+        var focused = false;
+        if (searchField is not null)
         {
-            // Ctrl+F only requests that the target application reveal/focus its
-            // search UI. No search is submitted before the text is verified.
+            var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
+            if (!focusResult.Success)
+            {
+                return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
+            }
+            focused = true;
+        }
+        else
+        {
+            var rememberedFocus = FocusRememberedSearchField(displayName, initial);
+            if (rememberedFocus is { } rememberedResult)
+            {
+                if (!rememberedResult.Success)
+                {
+                    return (rememberedResult, null);
+                }
+                focused = true;
+            }
+        }
+
+        if (!focused)
+        {
+            // QQ、微信和网易云在第一次搜索后会用旧关键词替换“搜索”
+            // 占位文字。Ctrl+F 可以聚焦应用自己的搜索框；输入后仍会
+            // 通过 OCR 在窗口顶部复核，复核失败则撤销本次输入。
             var revealResult = PressHotkey("ctrl+f");
             if (!revealResult.Success)
             {
                 return (revealResult, null);
             }
-            await Task.Delay(420, cancellationToken);
+            await Task.Delay(180, cancellationToken);
             if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
             {
                 return (ToolExecutionResult.Fail($"{displayName} 在显示搜索框时失去前台，已停止输入。"), null);
             }
+
             initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
             searchField = ScreenAutomationHeuristics.FindSearchField(initial);
-        }
-        if (searchField is null)
-        {
-            return (ToolExecutionResult.Fail(
-                $"屏幕上没有识别到 {displayName} 的搜索框。为避免把文字输入错误位置，没有继续操作。"), null);
+            if (searchField is not null)
+            {
+                var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
+                if (!focusResult.Success)
+                {
+                    return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
+                }
+            }
+            else if (!SupportsDirectSearchShortcut(displayName, processNames))
+            {
+                return (ToolExecutionResult.Fail(
+                    $"屏幕上没有识别到 {displayName} 的搜索框。为避免把文字输入错误位置，没有继续操作。"), null);
+            }
         }
 
-        var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
-        if (!focusResult.Success)
-        {
-            return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
-        }
-        await Task.Delay(120, cancellationToken);
+        await Task.Delay(80, cancellationToken);
         if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
         {
             return (ToolExecutionResult.Fail($"{displayName} 的搜索框聚焦后窗口发生变化，已停止输入。"), null);
@@ -620,33 +694,182 @@ internal sealed class WindowsController
         {
             return (selectAllResult, null);
         }
-        await Task.Delay(60, cancellationToken);
+        await Task.Delay(40, cancellationToken);
         var typeResult = TypeText(query);
         if (!typeResult.Success)
         {
             return (typeResult, null);
         }
 
-        await Task.Delay(360, cancellationToken);
-        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
-        {
-            return (ToolExecutionResult.Fail(
-                $"{displayName} 在核对搜索词前失去前台；文字可能已输入，但没有提交搜索。"), null);
-        }
-        var verification = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
-        var typedQuery = ScreenAutomationHeuristics.FindTypedSearchText(
-            verification,
+        var verification = await WaitForSearchTextAsync(
+            handle,
             query,
-            searchField.Bounds);
-        if (typedQuery is null)
+            searchField?.Bounds,
+            SupportsDirectSearchShortcut(displayName, processNames),
+            cancellationToken);
+        if (verification.Snapshot is null || verification.Item is null)
         {
+            if (ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                // Ctrl+Z restores the previous search text or draft if a shortcut
+                // unexpectedly focused the wrong editor. Nothing is submitted.
+                PressHotkey("ctrl+z");
+            }
             return (ToolExecutionResult.Fail(
-                $"已经尝试输入“{query}”，但屏幕识别没有在原搜索框位置核对到相同文字，因此没有点击搜索或按回车。"), null);
+                $"已经尝试在 {displayName} 聚焦搜索框，但屏幕没有在顶部搜索区域核对到“{query}”。本次输入已撤销，没有点击搜索或按回车。"), null);
         }
 
+        var typedQuery = verification.Item;
+        var verifiedSnapshot = verification.Snapshot;
+        searchField ??= new ScreenTextItem(typedQuery.Index, "搜索框", typedQuery.Bounds);
+        RememberSearchField(displayName, verifiedSnapshot, typedQuery.Bounds);
         return (
             ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
-            new VerifiedSearchInput(verification, searchField, typedQuery));
+            new VerifiedSearchInput(verifiedSnapshot, searchField, typedQuery));
+    }
+
+    private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item)> WaitForSearchTextAsync(
+        IntPtr handle,
+        string query,
+        Rectangle? expectedBounds,
+        bool allowTopRegion,
+        CancellationToken cancellationToken)
+    {
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(2.6))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                return (null, null);
+            }
+
+            var snapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+            var item = expectedBounds is null
+                ? null
+                : ScreenAutomationHeuristics.FindTypedSearchText(snapshot, query, expectedBounds.Value);
+            if (item is null && allowTopRegion)
+            {
+                item = ScreenAutomationHeuristics.FindTypedSearchTextInTopRegion(snapshot, query);
+            }
+            if (item is not null)
+            {
+                return (snapshot, item);
+            }
+
+            await Task.Delay(160, cancellationToken);
+        }
+
+        return (null, null);
+    }
+
+    private async Task<ScreenSnapshot?> WaitForRecognizedSnapshotAsync(
+        IntPtr handle,
+        TimeSpan timeout,
+        Func<ScreenSnapshot, bool> predicate,
+        CancellationToken cancellationToken,
+        int initialDelayMilliseconds = 0)
+    {
+        if (initialDelayMilliseconds > 0)
+        {
+            await Task.Delay(initialDelayMilliseconds, cancellationToken);
+        }
+
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                return null;
+            }
+
+            var snapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
+            if (predicate(snapshot))
+            {
+                return snapshot;
+            }
+
+            await Task.Delay(180, cancellationToken);
+        }
+
+        return null;
+    }
+
+    private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item)> WaitForRecognizedItemAsync(
+        IntPtr handle,
+        TimeSpan timeout,
+        Func<ScreenSnapshot, ScreenTextItem?> selector,
+        CancellationToken cancellationToken,
+        int initialDelayMilliseconds = 0)
+    {
+        ScreenTextItem? selected = null;
+        var snapshot = await WaitForRecognizedSnapshotAsync(
+            handle,
+            timeout,
+            candidate => (selected = selector(candidate)) is not null,
+            cancellationToken,
+            initialDelayMilliseconds);
+        return (snapshot, selected);
+    }
+
+    private ToolExecutionResult? FocusRememberedSearchField(string displayName, ScreenSnapshot snapshot)
+    {
+        if (!_searchFieldHints.TryGetValue(displayName, out var hint)
+            || DateTimeOffset.Now - hint.CreatedAt > TimeSpan.FromHours(12))
+        {
+            return null;
+        }
+
+        var x = snapshot.WindowBounds.Left + (int)Math.Round(snapshot.WindowBounds.Width * hint.RelativeX);
+        var y = snapshot.WindowBounds.Top + (int)Math.Round(snapshot.WindowBounds.Height * hint.RelativeY);
+        var point = new Point(x, y);
+        var safeTopRegion = new Rectangle(
+            snapshot.WindowBounds.Left,
+            snapshot.WindowBounds.Top,
+            snapshot.WindowBounds.Width,
+            (int)(snapshot.WindowBounds.Height * 0.28));
+        if (!safeTopRegion.Contains(point))
+        {
+            _searchFieldHints.Remove(displayName);
+            return null;
+        }
+
+        var moveResult = MoveMouse(point.X, point.Y);
+        return moveResult.Success ? SendMouseButton("left", 1) : moveResult;
+    }
+
+    private void RememberSearchField(string displayName, ScreenSnapshot snapshot, Rectangle bounds)
+    {
+        if (snapshot.WindowBounds.Width <= 0 || snapshot.WindowBounds.Height <= 0)
+        {
+            return;
+        }
+
+        var centerX = bounds.Left + bounds.Width / 2d;
+        var centerY = bounds.Top + bounds.Height / 2d;
+        _searchFieldHints[displayName] = new SearchFieldHint(
+            Math.Clamp((centerX - snapshot.WindowBounds.Left) / snapshot.WindowBounds.Width, 0.02, 0.98),
+            Math.Clamp((centerY - snapshot.WindowBounds.Top) / snapshot.WindowBounds.Height, 0.02, 0.24),
+            DateTimeOffset.Now);
+    }
+
+    private static bool SupportsDirectSearchShortcut(
+        string displayName,
+        IReadOnlyList<string> processNames)
+    {
+        if (displayName.Equals("QQ", StringComparison.OrdinalIgnoreCase)
+            || displayName.Contains("微信", StringComparison.OrdinalIgnoreCase)
+            || displayName.Contains("网易云", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return processNames.Any(processName =>
+            processName.Equals("qq", StringComparison.OrdinalIgnoreCase)
+            || processName.Equals("wechat", StringComparison.OrdinalIgnoreCase)
+            || processName.Equals("weixin", StringComparison.OrdinalIgnoreCase)
+            || processName.Equals("cloudmusic", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<ToolExecutionResult> ClickRecognizedItemAsync(
@@ -853,11 +1076,10 @@ internal sealed class WindowsController
 
     private static int DefaultOpenClickCount(string processName)
     {
-        return processName.Equals("StartMenuExperienceHost", StringComparison.OrdinalIgnoreCase)
-               || processName.Equals("SearchHost", StringComparison.OrdinalIgnoreCase)
-               || processName.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase)
-            ? 1
-            : 2;
+        // Desktop and File Explorer items conventionally require a double
+        // click. Browser links, Start menu entries and application controls use
+        // one click; double-clicking them can open duplicate pages or actions.
+        return processName.Equals("explorer", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
     }
 
     private static string NormalizeVisibleText(string text) =>
@@ -1154,50 +1376,39 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("已经提交网易云搜索，但没有找到可继续操作的网易云窗口。请等待应用显示后重试。");
         }
 
-        ToolExecutionResult lastInspection = default;
-        for (var attempt = 0; attempt < 3; attempt++)
+        if (!EnsureExactTargetIsForeground(handle, processNames))
         {
-            await Task.Delay(attempt == 0 ? 1600 : 900, cancellationToken);
-            if (!EnsureExactTargetIsForeground(handle, processNames))
-            {
-                return ToolExecutionResult.Fail("网易云搜索后窗口没有保持在前台，已停止后续点击，避免操作错误窗口。");
-            }
-
-            lastInspection = await InspectScreenAsync(80, cancellationToken);
-            if (!lastInspection.Success || _screenSnapshot is null)
-            {
-                if (attempt == 2)
-                {
-                    return ToolExecutionResult.Fail($"已经在网易云中搜索“{query.Trim()}”，但屏幕识别未完成：{lastInspection.Message}");
-                }
-                continue;
-            }
-
-            var snapshot = _screenSnapshot;
-            var resultItem = NeteaseMusicAutomation.FindResultItem(snapshot, resultNumber, query.Trim());
-            if (resultItem is null)
-            {
-                continue;
-            }
-
-            var clickResult = await ClickScreenItemAsync(
-                snapshot.Id,
-                resultItem.Index,
-                2,
-                cancellationToken);
-            if (!clickResult.Success)
-            {
-                return ToolExecutionResult.Fail(
-                    $"已经在网易云中搜索“{query.Trim()}”，但播放第 {resultNumber} 个结果时停止：{clickResult.Message}");
-            }
-
-            _log($"网易云连续任务完成：搜索并播放第 {resultNumber} 个结果；搜索词未写入额外诊断文件。");
-            return ToolExecutionResult.Ok(
-                $"已打开网易云音乐，在客户端中搜索“{query.Trim()}”，并双击播放第 {resultNumber} 个搜索结果。");
+            return ToolExecutionResult.Fail("网易云搜索后窗口没有保持在前台，已停止后续点击，避免操作错误窗口。");
         }
 
-        return ToolExecutionResult.Fail(
-            $"已打开网易云音乐并搜索“{query.Trim()}”，但无法可靠判断第 {resultNumber} 个歌曲结果，因此没有猜测点击。最近一次识别结果：{lastInspection.Message}");
+        var foundResult = await WaitForRecognizedItemAsync(
+            handle,
+            TimeSpan.FromSeconds(8),
+            snapshot => NeteaseMusicAutomation.FindResultItem(snapshot, resultNumber, query.Trim()),
+            cancellationToken,
+            initialDelayMilliseconds: 420);
+        if (foundResult.Snapshot is null || foundResult.Item is null)
+        {
+            return ToolExecutionResult.Fail(
+                $"已打开网易云音乐并搜索“{query.Trim()}”，但在等待时间内无法可靠判断第 {resultNumber} 个歌曲结果，因此没有猜测点击。");
+        }
+
+        var clickResult = await ClickRecognizedItemAsync(
+            foundResult.Snapshot,
+            foundResult.Item,
+            2,
+            cancellationToken,
+            refreshed => NeteaseMusicAutomation.ResolveResultClickPoint(foundResult.Snapshot, refreshed));
+        if (!clickResult.Success)
+        {
+            return ToolExecutionResult.Fail(
+                $"已经在网易云中搜索“{query.Trim()}”，但播放第 {resultNumber} 个结果时停止：{clickResult.Message}");
+        }
+
+        _screenSnapshot = null;
+        _log($"网易云连续任务完成：搜索并播放第 {resultNumber} 个结果；搜索词未写入额外诊断文件。");
+        return ToolExecutionResult.Ok(
+            $"已打开网易云音乐，在客户端中搜索“{query.Trim()}”，并双击播放第 {resultNumber} 个搜索结果。");
     }
 
     private async Task<ToolExecutionResult> AppActionAsync(
@@ -1479,22 +1690,22 @@ internal sealed class WindowsController
         // QQ and WeChat both show live contact results. The verified search text
         // is never submitted with Enter because that would blindly open the
         // first result. Instead, wait for OCR and click the one exact contact.
-        var resultDelay = app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 1050 : 850;
-        await Task.Delay(resultDelay, cancellationToken);
-        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
-        {
-            return ToolExecutionResult.Fail($"等待 {app.DisplayName} 联系人结果时窗口失去前台，消息没有输入。");
-        }
-        var resultSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
-        var contact = ScreenAutomationHeuristics.FindRecipientResult(
-            resultSnapshot,
-            recipient,
-            filled.Input.OriginalField.Bounds);
-        if (contact is null)
+        var contactResult = await WaitForRecognizedItemAsync(
+            handle,
+            TimeSpan.FromSeconds(app.Alias.Equals("qq", StringComparison.OrdinalIgnoreCase) ? 5.2 : 4.5),
+            snapshot => ScreenAutomationHeuristics.FindRecipientResult(
+                snapshot,
+                recipient,
+                filled.Input.OriginalField.Bounds),
+            cancellationToken,
+            initialDelayMilliseconds: 160);
+        if (contactResult.Snapshot is null || contactResult.Item is null)
         {
             return ToolExecutionResult.Fail(
                 $"已经在 {app.DisplayName} 搜索框中输入并核对“{recipient}”，但没有识别到唯一同名联系人。为避免发错人，没有按回车、没有猜测选择，也没有输入消息。");
         }
+        var resultSnapshot = contactResult.Snapshot;
+        var contact = contactResult.Item;
 
         var openConversationResult = await ClickRecognizedItemAsync(
             resultSnapshot,
@@ -1506,12 +1717,18 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail($"联系人“{recipient}”核对成功，但打开会话时停止：{openConversationResult.Message}");
         }
 
-        await Task.Delay(650, cancellationToken);
-        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        var conversationSnapshot = await WaitForRecognizedSnapshotAsync(
+            handle,
+            TimeSpan.FromSeconds(4.5),
+            snapshot => ScreenAutomationHeuristics.FindConversationHeader(snapshot, recipient) is not null
+                        && ScreenAutomationHeuristics.FindComposerTarget(snapshot) is not null,
+            cancellationToken,
+            initialDelayMilliseconds: 140);
+        if (conversationSnapshot is null)
         {
-            return ToolExecutionResult.Fail($"打开 {app.DisplayName} 会话后窗口失去前台，消息没有输入。");
+            return ToolExecutionResult.Fail(
+                $"已点击联系人“{recipient}”，但 {app.DisplayName} 会话没有在等待时间内完整显示，因此没有输入消息。");
         }
-        var conversationSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
         var header = ScreenAutomationHeuristics.FindConversationHeader(conversationSnapshot, recipient);
         if (header is null)
         {
@@ -1562,13 +1779,18 @@ internal sealed class WindowsController
             return messageResult;
         }
 
-        await Task.Delay(380, cancellationToken);
-        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        var preparedSnapshot = await WaitForRecognizedSnapshotAsync(
+            handle,
+            TimeSpan.FromSeconds(3.2),
+            snapshot => ScreenAutomationHeuristics.FindConversationHeader(snapshot, recipient, header.Bounds) is not null
+                        && ScreenAutomationHeuristics.FindTypedMessage(snapshot, message) is not null,
+            cancellationToken,
+            initialDelayMilliseconds: 120);
+        if (preparedSnapshot is null)
         {
             return ToolExecutionResult.Fail(
-                $"{app.DisplayName} 在核对消息草稿前失去前台；没有执行发送，请重新准备。");
+                $"消息文字已经尝试填入，但 {app.DisplayName} 没有在等待时间内同时显示正确联系人和草稿，因此没有生成发送确认。");
         }
-        var preparedSnapshot = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
         var verifiedHeader = ScreenAutomationHeuristics.FindConversationHeader(
             preparedSnapshot,
             recipient,
@@ -1972,6 +2194,11 @@ internal sealed class WindowsController
     {
         try
         {
+            string[] actionTrace;
+            lock (_traceGate)
+            {
+                actionTrace = _recentActionTrace.ToArray();
+            }
             Directory.CreateDirectory(_settingsStore.DiagnosticsDirectory);
             var path = Path.Combine(
                 _settingsStore.DiagnosticsDirectory,
@@ -1982,7 +2209,10 @@ internal sealed class WindowsController
                 $"键盘输入结构：{Marshal.SizeOf<Input>()} 字节（预期 {(IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86)} 字节）",
                 $"键鼠输入组件：{(IsNativeInputEngineValid ? "正常" : "异常")}",
                 string.Empty,
-                InstalledAppResolver.BuildDiagnosticReport(_getApps()));
+                InstalledAppResolver.BuildDiagnosticReport(_getApps()),
+                string.Empty,
+                "最近控制记录（最多 80 条，仅在本机生成）：",
+                actionTrace.Length == 0 ? "暂无控制记录。" : string.Join(Environment.NewLine, actionTrace));
             File.WriteAllText(path, report);
             _log($"应用诊断报告已导出：{path}");
             return ToolExecutionResult.Ok($"诊断报告已保存到：{path}");

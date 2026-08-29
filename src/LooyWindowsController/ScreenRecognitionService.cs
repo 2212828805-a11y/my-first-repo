@@ -10,7 +10,12 @@ using Windows.Storage.Streams;
 
 namespace Looy.WindowsController;
 
-internal sealed record ScreenTextItem(int Index, string Text, Rectangle Bounds);
+internal sealed record ScreenTextFragment(string Text, Rectangle Bounds);
+
+internal sealed record ScreenTextItem(int Index, string Text, Rectangle Bounds)
+{
+    public IReadOnlyList<ScreenTextFragment> Fragments { get; init; } = Array.Empty<ScreenTextFragment>();
+}
 
 internal sealed record ScreenSnapshot(
     string Id,
@@ -154,16 +159,20 @@ internal static class ScreenRecognitionService
         CancellationToken cancellationToken)
     {
         var refreshed = await InspectWindowAsync(snapshot.WindowHandle, 80, cancellationToken);
-        var expectedText = NormalizeText(expected.Text);
+        var expectedText = NormalizeComparableText(expected.Text);
         var expectedCenter = Center(expected.Bounds);
+        var allowedDistance = Math.Max(180, Math.Max(expected.Bounds.Width, expected.Bounds.Height) * 3);
         var candidates = refreshed.Items
-            .Where(item => NormalizeText(item.Text).Equals(expectedText, StringComparison.OrdinalIgnoreCase))
             .Select(item => new
             {
                 Item = item,
-                Distance = DistanceSquared(expectedCenter, Center(item.Bounds))
+                Distance = DistanceSquared(expectedCenter, Center(item.Bounds)),
+                Similarity = TextSimilarity(expectedText, NormalizeComparableText(item.Text))
             })
-            .OrderBy(candidate => candidate.Distance)
+            .Where(candidate => candidate.Distance <= (long)allowedDistance * allowedDistance)
+            .Where(candidate => candidate.Similarity >= (expectedText.Length < 4 ? 1d : 0.78d))
+            .OrderByDescending(candidate => candidate.Similarity)
+            .ThenBy(candidate => candidate.Distance)
             .ToArray();
 
         if (candidates.Length == 0)
@@ -172,8 +181,13 @@ internal static class ScreenRecognitionService
         }
 
         var closest = candidates[0];
-        var allowedDistance = Math.Max(180, Math.Max(expected.Bounds.Width, expected.Bounds.Height) * 3);
-        return closest.Distance <= (long)allowedDistance * allowedDistance ? closest.Item : null;
+        if (candidates.Length > 1
+            && Math.Abs(closest.Similarity - candidates[1].Similarity) < 0.03d
+            && Math.Abs(closest.Distance - candidates[1].Distance) < 24L * 24L)
+        {
+            return null;
+        }
+        return closest.Item;
     }
 
     internal static async Task<string> RunComponentSelfTestAsync()
@@ -258,7 +272,7 @@ internal static class ScreenRecognitionService
 
         var scaleX = originalSize.Width / (double)bitmap.Width;
         var scaleY = originalSize.Height / (double)bitmap.Height;
-        var recognizedItems = new List<(string Text, Rectangle Bounds)>();
+        var recognizedItems = new List<(string Text, Rectangle Bounds, IReadOnlyList<ScreenTextFragment> Fragments)>();
         foreach (var line in result.Lines)
         {
             var text = line.Text.Trim();
@@ -267,29 +281,49 @@ internal static class ScreenRecognitionService
                 continue;
             }
 
-            var left = line.Words.Min(word => word.BoundingRect.Left);
-            var top = line.Words.Min(word => word.BoundingRect.Top);
-            var right = line.Words.Max(word => word.BoundingRect.Right);
-            var bottom = line.Words.Max(word => word.BoundingRect.Bottom);
+            var fragments = line.Words
+                .Select(word =>
+                {
+                    var wordBounds = Rectangle.FromLTRB(
+                        screenBounds.Left + (int)Math.Floor(word.BoundingRect.Left * scaleX),
+                        screenBounds.Top + (int)Math.Floor(word.BoundingRect.Top * scaleY),
+                        screenBounds.Left + (int)Math.Ceiling(word.BoundingRect.Right * scaleX),
+                        screenBounds.Top + (int)Math.Ceiling(word.BoundingRect.Bottom * scaleY));
+                    return new ScreenTextFragment(
+                        word.Text.Trim(),
+                        Rectangle.Intersect(wordBounds, screenBounds));
+                })
+                .Where(fragment => fragment.Text.Length > 0
+                                   && fragment.Bounds.Width >= 2
+                                   && fragment.Bounds.Height >= 2)
+                .OrderBy(fragment => fragment.Bounds.Left)
+                .ToArray();
+            if (fragments.Length == 0)
+            {
+                continue;
+            }
+
             var bounds = Rectangle.FromLTRB(
-                screenBounds.Left + (int)Math.Floor(left * scaleX),
-                screenBounds.Top + (int)Math.Floor(top * scaleY),
-                screenBounds.Left + (int)Math.Ceiling(right * scaleX),
-                screenBounds.Top + (int)Math.Ceiling(bottom * scaleY));
-            bounds = Rectangle.Intersect(bounds, screenBounds);
+                fragments.Min(fragment => fragment.Bounds.Left),
+                fragments.Min(fragment => fragment.Bounds.Top),
+                fragments.Max(fragment => fragment.Bounds.Right),
+                fragments.Max(fragment => fragment.Bounds.Bottom));
             if (bounds.Width < 2 || bounds.Height < 2)
             {
                 continue;
             }
 
-            recognizedItems.Add((text, bounds));
+            recognizedItems.Add((text, bounds, fragments));
         }
 
         var items = recognizedItems
             .OrderBy(item => item.Bounds.Top)
             .ThenBy(item => item.Bounds.Left)
             .Take(maxItems)
-            .Select((item, index) => new ScreenTextItem(index + 1, item.Text, item.Bounds))
+            .Select((item, index) => new ScreenTextItem(index + 1, item.Text, item.Bounds)
+            {
+                Fragments = item.Fragments
+            })
             .ToArray();
         return (engine.RecognizerLanguage.LanguageTag, items);
     }
@@ -319,6 +353,55 @@ internal static class ScreenRecognitionService
 
     private static string NormalizeText(string text) =>
         string.Concat(text.Where(character => !char.IsWhiteSpace(character))).Trim();
+
+    private static string NormalizeComparableText(string text)
+    {
+        var normalized = string.Concat(text.Where(char.IsLetterOrDigit));
+        return normalized.Length == 0 ? NormalizeText(text) : normalized;
+    }
+
+    private static double TextSimilarity(string expected, string candidate)
+    {
+        if (expected.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+        {
+            return 1d;
+        }
+        if (expected.Length == 0 || candidate.Length == 0)
+        {
+            return 0d;
+        }
+
+        if (expected.Length >= 4 && candidate.Length >= 4
+            && (expected.Contains(candidate, StringComparison.OrdinalIgnoreCase)
+                || candidate.Contains(expected, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Math.Min(expected.Length, candidate.Length) / (double)Math.Max(expected.Length, candidate.Length);
+        }
+
+        var previous = new int[candidate.Length + 1];
+        var current = new int[candidate.Length + 1];
+        for (var column = 0; column <= candidate.Length; column++)
+        {
+            previous[column] = column;
+        }
+        for (var row = 1; row <= expected.Length; row++)
+        {
+            current[0] = row;
+            for (var column = 1; column <= candidate.Length; column++)
+            {
+                var substitution = char.ToUpperInvariant(expected[row - 1]) == char.ToUpperInvariant(candidate[column - 1])
+                    ? 0
+                    : 1;
+                current[column] = Math.Min(
+                    Math.Min(current[column - 1] + 1, previous[column] + 1),
+                    previous[column - 1] + substitution);
+            }
+            (previous, current) = (current, previous);
+        }
+
+        var distance = previous[candidate.Length];
+        return 1d - distance / (double)Math.Max(expected.Length, candidate.Length);
+    }
 
     private static Point Center(Rectangle bounds) =>
         new(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);

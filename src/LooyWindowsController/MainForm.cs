@@ -55,12 +55,12 @@ internal sealed class MainForm : Form
         ApplySettingsToUi();
         WireEvents();
         _initializing = false;
-        WriteLog("路遥智控 0.6.0 已启动。连接密钥不会显示在运行记录中。");
+        WriteLog("路遥智控 0.6.1 已启动。连接密钥不会显示在运行记录中。");
     }
 
     private void BuildWindow()
     {
-        Text = "路遥智控 · LOOY v0.6.0";
+        Text = "路遥智控 · LOOY v0.6.1";
         Width = 1040;
         Height = 760;
         MinimumSize = new Size(900, 680);

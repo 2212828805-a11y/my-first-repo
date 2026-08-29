@@ -93,7 +93,7 @@ QQ/微信消息必须先调用 windows.prepare_chat_message；该工具只填入
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.6.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.6.1.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -131,9 +131,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.6.0` 的标签。
+- 推送形如 `v0.6.1` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.6.0` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.6.1` artifact 即可。
 
 ## 默认应用列表
 
@@ -150,6 +150,8 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 0.5.2 统一修正可见搜索流程：先聚焦输入框、输入并 OCR 核对搜索词，再根据屏幕是否存在唯一独立搜索按钮决定鼠标点击或回车。QQ 和微信消息改为两步操作：每次换人都会重新搜索唯一联系人并核对会话标题，只清除旧草稿和填入新消息；用户后续明确“确认发送”后，程序再次核对联系人与草稿并只发送一次。确认编号两分钟失效且不可重复使用。
 
 0.6.0 参考公开 [xiaozhi-MCPTools](https://github.com/ZongZiTongXue/xiaozhi-MCPTools) 的功能清单重新实现安全系统控制：新增资源监控、剪贴板文字读取、显示桌面、文档查找、PowerPoint/WPS 演示控制、准确音量、主题和本机壁纸，以及准备/确认两步的锁定、关机和重启。没有复制任意 CMD、任意文件写入、直接自动发送、自动修改杀毒白名单或依赖固定等待和固定 Tab 次数的实现。
+
+0.6.1 重点修复连续控制不稳定：QQ、微信和网易云在搜索框已经存在旧关键词时，会优先使用上次核对位置或应用搜索快捷键，输入新内容后再通过 OCR 核对顶部搜索区域；核对失败会撤销本次输入，不会提交。联系人、会话、草稿和网易云歌曲结果改为动态等待；诊断报告会包含最近 80 条本机控制结果和耗时，便于继续定位偶发问题。
 
 应用配置和加密后的 MCP 地址保存在：
 

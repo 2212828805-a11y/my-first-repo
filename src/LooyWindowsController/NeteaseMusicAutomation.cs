@@ -95,6 +95,40 @@ internal static class NeteaseMusicAutomation
         return null;
     }
 
+    public static Point ResolveResultClickPoint(
+        ScreenSnapshot snapshot,
+        ScreenTextItem refreshedItem)
+    {
+        var titleFragment = refreshedItem.Fragments
+            .OrderBy(fragment => fragment.Bounds.Left)
+            .FirstOrDefault(fragment =>
+            {
+                var text = fragment.Text.Trim();
+                return text.Length >= 1
+                       && TryReadResultNumber(text) is null
+                       && !DurationPattern.IsMatch(text)
+                       && !text.Equals("音乐", StringComparison.OrdinalIgnoreCase)
+                       && !text.Equals("歌曲", StringComparison.OrdinalIgnoreCase);
+            });
+        if (titleFragment is not null)
+        {
+            return Center(titleFragment.Bounds);
+        }
+
+        // Windows OCR sometimes merges an entire song row into one item. The
+        // geometric center can land on the album/artist column, so bias the
+        // click toward the title column while keeping it inside the row.
+        if (refreshedItem.Bounds.Width >= snapshot.WindowBounds.Width * 0.42)
+        {
+            var offset = Math.Clamp((int)Math.Round(refreshedItem.Bounds.Width * 0.17), 48, 180);
+            return new Point(
+                Math.Min(refreshedItem.Bounds.Right - 8, refreshedItem.Bounds.Left + offset),
+                CenterY(refreshedItem.Bounds));
+        }
+
+        return Center(refreshedItem.Bounds);
+    }
+
     internal static bool RunComponentSelfTest()
     {
         var snapshot = new ScreenSnapshot(
@@ -108,11 +142,24 @@ internal static class NeteaseMusicAutomation
                 new ScreenTextItem(1, "音乐标题 歌手 专辑 时长", new Rectangle(100, 210, 900, 28)),
                 new ScreenTextItem(2, "01 晴天 周杰伦 叶惠美 04:29", new Rectangle(100, 260, 900, 30)),
                 new ScreenTextItem(3, "02 晴天 (Live) 周杰伦 04:35", new Rectangle(100, 305, 900, 30))
+                {
+                    Fragments =
+                    [
+                        new ScreenTextFragment("02", new Rectangle(100, 305, 28, 30)),
+                        new ScreenTextFragment("晴天 (Live)", new Rectangle(150, 305, 150, 30)),
+                        new ScreenTextFragment("周杰伦", new Rectangle(360, 305, 80, 30)),
+                        new ScreenTextFragment("04:35", new Rectangle(900, 305, 70, 30))
+                    ]
+                }
             ]);
         var second = FindResultItem(snapshot, 2, "晴天");
+        var clickPoint = second is null ? Point.Empty : ResolveResultClickPoint(snapshot, second);
+        var expectedTitlePoint = new Point(225, 320);
         return ShouldRejectWebSearch("打开网易云音乐", false)
                && !ShouldRejectWebSearch("网页搜索网易云音乐", true)
-               && second?.Index == 3;
+               && second?.Index == 3
+               && clickPoint == expectedTitlePoint
+               && second.Bounds.Contains(clickPoint);
     }
 
     private static ScreenTextItem? SelectItemOnSameRow(
@@ -158,6 +205,9 @@ internal static class NeteaseMusicAutomation
     }
 
     private static int CenterY(Rectangle bounds) => bounds.Top + bounds.Height / 2;
+
+    private static Point Center(Rectangle bounds) =>
+        new(bounds.Left + bounds.Width / 2, CenterY(bounds));
 
     private static string Normalize(string text) =>
         string.Concat(text.Where(character => !char.IsWhiteSpace(character))).Trim();
