@@ -55,6 +55,28 @@ internal static class Program
             Environment.ExitCode = WindowsSystemTools.RunComponentSelfTest() ? 0 : 87;
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-welcome-page", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = WelcomeForm.RunComponentSelfTest() ? 0 : 87;
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-window-close-routing", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = InstalledAppResolver.RunCloseRoutingSelfTest() ? 0 : 87;
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-release-protection", StringComparison.OrdinalIgnoreCase)))
+        {
+#if RELEASE_PROTECTED
+            Environment.ExitCode = 0;
+#else
+            Environment.ExitCode = 87;
+#endif
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -66,6 +88,17 @@ internal static class Program
                 ShowFatalError(exception);
             }
         };
+
+        var commandLineArguments = Environment.GetCommandLineArgs();
+        var skipWelcomePage = commandLineArguments.Any(argument =>
+            argument.Equals("--autostart", StringComparison.OrdinalIgnoreCase)
+            || argument.Equals("--elevated-restart", StringComparison.OrdinalIgnoreCase)
+            || argument.Equals("--skip-welcome", StringComparison.OrdinalIgnoreCase));
+        if (!skipWelcomePage)
+        {
+            using var welcomeForm = new WelcomeForm();
+            welcomeForm.ShowDialog();
+        }
 
         Application.Run(new MainForm());
     }

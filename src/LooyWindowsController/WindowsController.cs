@@ -24,6 +24,7 @@ internal sealed class WindowsController
     private const int ExpectedInputSizeX86 = 28;
     private const int ExpectedInputSizeX64 = 40;
     private const uint GetAncestorRootOwner = 3;
+    private const uint WindowMessageClose = 0x0010;
 
     private readonly Func<string, bool> _permissionEnabled;
     private readonly Func<string, string, CancellationToken, Task<bool>> _requestPermission;
@@ -142,9 +143,9 @@ internal sealed class WindowsController
                 "windows.open_app" => RequirePermission(
                     PermissionKeys.Applications,
                     () => OpenApp(RequiredString(arguments, "app"))),
-                "windows.close_app" => RequirePermission(
-                    PermissionKeys.Applications,
-                    () => CloseApp(RequiredString(arguments, "app"))),
+                "windows.close_app" => !_permissionEnabled(PermissionKeys.Applications)
+                    ? ToolExecutionResult.Fail("用户尚未在路遥智控中授权此项操作。")
+                    : await CloseAppAsync(RequiredString(arguments, "app"), cancellationToken),
                 "windows.netease_music_task" => !_permissionEnabled(PermissionKeys.Applications)
                     ? ToolExecutionResult.Fail("用户尚未授权应用操作。")
                     : await NeteaseMusicTaskAsync(
@@ -715,17 +716,117 @@ internal sealed class WindowsController
                 // unexpectedly focused the wrong editor. Nothing is submitted.
                 PressHotkey("ctrl+z");
             }
-            return (ToolExecutionResult.Fail(
-                $"已经尝试在 {displayName} 聚焦搜索框，但屏幕没有在顶部搜索区域核对到“{query}”。本次输入已撤销，没有点击搜索或按回车。"), null);
+
+            if (NeteaseMusicAutomation.IsNeteaseTarget(displayName, processNames))
+            {
+                var neteaseFallback = await TryNeteaseSearchFallbackAsync(
+                    handle,
+                    processNames,
+                    query,
+                    initial,
+                    cancellationToken);
+                if (neteaseFallback.Snapshot is not null
+                    && neteaseFallback.Item is not null
+                    && neteaseFallback.Field is not null)
+                {
+                    verification = (neteaseFallback.Snapshot, neteaseFallback.Item);
+                    searchField = neteaseFallback.Field;
+                    _log("网易云搜索框未被 OCR 直接识别，已通过顶部候选区输入并完成二次文字核对。");
+                }
+                else
+                {
+                    return (ToolExecutionResult.Fail(
+                        $"网易云搜索框的文字和快捷键都没有被可靠识别；已尝试两个安全顶部位置，但均未在输入区核对到“{query}”。所有试输入均已撤销，没有提交搜索。请将网易云主窗口最大化后重试。"), null);
+                }
+            }
+            else
+            {
+                return (ToolExecutionResult.Fail(
+                    $"已经尝试在 {displayName} 聚焦搜索框，但屏幕没有在顶部搜索区域核对到“{query}”。本次输入已撤销，没有点击搜索或按回车。"), null);
+            }
         }
 
-        var typedQuery = verification.Item;
-        var verifiedSnapshot = verification.Snapshot;
+        var typedQuery = verification.Item!;
+        var verifiedSnapshot = verification.Snapshot!;
         searchField ??= new ScreenTextItem(typedQuery.Index, "搜索框", typedQuery.Bounds);
         RememberSearchField(displayName, verifiedSnapshot, typedQuery.Bounds);
         return (
             ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
             new VerifiedSearchInput(verifiedSnapshot, searchField, typedQuery));
+    }
+
+    private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item, ScreenTextItem? Field)>
+        TryNeteaseSearchFallbackAsync(
+            IntPtr handle,
+            IReadOnlyList<string> processNames,
+            string query,
+            ScreenSnapshot initial,
+            CancellationToken cancellationToken)
+    {
+        PressHotkey("escape");
+        foreach (var bounds in NeteaseMusicAutomation.GetSearchFocusFallbacks(initial))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!EnsureExactTargetIsForeground(handle, processNames))
+            {
+                return (null, null, null);
+            }
+
+            var point = new Point(
+                bounds.Left + bounds.Width / 2,
+                bounds.Top + bounds.Height / 2);
+            var moveResult = MoveMouse(point.X, point.Y);
+            if (!moveResult.Success)
+            {
+                continue;
+            }
+            var clickResult = SendMouseButton("left", 1);
+            if (!clickResult.Success)
+            {
+                continue;
+            }
+
+            await Task.Delay(120, cancellationToken);
+            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                return (null, null, null);
+            }
+            var selectAllResult = PressHotkey("ctrl+a");
+            if (!selectAllResult.Success)
+            {
+                continue;
+            }
+            await Task.Delay(40, cancellationToken);
+            var typeResult = TypeText(query);
+            if (!typeResult.Success)
+            {
+                continue;
+            }
+
+            var verification = await WaitForSearchTextAsync(
+                handle,
+                query,
+                bounds,
+                allowTopRegion: true,
+                cancellationToken: cancellationToken);
+            if (verification.Snapshot is not null && verification.Item is not null)
+            {
+                var field = new ScreenTextItem(
+                    verification.Item.Index,
+                    "网易云搜索框",
+                    bounds);
+                return (verification.Snapshot, verification.Item, field);
+            }
+
+            if (ScreenRecognitionService.IsExactForegroundWindow(handle))
+            {
+                PressHotkey("ctrl+z");
+                PressHotkey("escape");
+                await Task.Delay(100, cancellationToken);
+            }
+        }
+
+        return (null, null, null);
     }
 
     private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item)> WaitForSearchTextAsync(
@@ -1268,7 +1369,7 @@ internal sealed class WindowsController
         return ToolExecutionResult.Ok($"Windows 已接收 {app.DisplayName} 的打开请求。");
     }
 
-    private ToolExecutionResult CloseApp(string alias)
+    private async Task<ToolExecutionResult> CloseAppAsync(string alias, CancellationToken cancellationToken)
     {
         var app = ResolveApp(alias);
         if (app is null)
@@ -1277,13 +1378,90 @@ internal sealed class WindowsController
         }
 
         var resolvedTarget = InstalledAppResolver.TryResolvePath(app);
-        if (string.IsNullOrWhiteSpace(resolvedTarget) || InstalledAppResolver.IsProtocol(resolvedTarget))
+        var processNames = InstalledAppResolver.GetProcessNames(app, resolvedTarget);
+        if (processNames.Count == 0)
         {
             return ToolExecutionResult.Fail("该应用使用系统协议启动，无法安全确定对应进程。请手动关闭。");
         }
 
+        var includeAllTopLevelWindows = InstalledAppResolver.IsMultiWindowBrowser(processNames);
+        var windows = FindClosableWindows(processNames, includeAllTopLevelWindows);
+        if (windows.Count == 0)
+        {
+            return ToolExecutionResult.Fail(
+                $"没有找到可正常关闭的 {app.DisplayName} 窗口；程序可能未运行、只在后台常驻，或窗口权限更高。");
+        }
+
         var requested = 0;
-        foreach (var processName in InstalledAppResolver.GetProcessNames(app, resolvedTarget))
+        var accessDenied = 0;
+        var otherFailures = 0;
+        foreach (var windowHandle in windows)
+        {
+            Marshal.SetLastPInvokeError(0);
+            if (PostMessage(windowHandle, WindowMessageClose, UIntPtr.Zero, IntPtr.Zero))
+            {
+                requested++;
+                continue;
+            }
+
+            var errorCode = Marshal.GetLastWin32Error();
+            if (errorCode == 5)
+            {
+                accessDenied++;
+            }
+            else
+            {
+                otherFailures++;
+            }
+        }
+
+        if (requested == 0)
+        {
+            _log(
+                $"Windows 拒绝关闭应用：{app.DisplayName}，权限拒绝 {accessDenied} 个窗口，"
+                + $"其他失败 {otherFailures} 个窗口。");
+            return accessDenied > 0 && !WindowsInputAccess.IsElevated
+                ? ToolExecutionResult.Fail(
+                    $"{app.DisplayName} 正在以管理员权限运行，普通模式无法关闭。请在路遥智控“授权管理”中点击“管理员模式重启”后重试；程序没有强杀进程。")
+                : ToolExecutionResult.Fail(
+                    $"Windows 没有接受 {app.DisplayName} 的正常关闭请求；可能是安全软件或受保护窗口阻止。程序没有强杀进程。");
+        }
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(4);
+        var remaining = windows.Count(windowHandle => IsWindow(windowHandle) && IsWindowVisible(windowHandle));
+        while (remaining > 0 && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(200, cancellationToken);
+            remaining = windows.Count(windowHandle => IsWindow(windowHandle) && IsWindowVisible(windowHandle));
+        }
+
+        if (remaining == 0)
+        {
+            _log($"已正常关闭应用窗口：{app.DisplayName}，共 {requested} 个窗口。");
+            return ToolExecutionResult.Ok(
+                $"{app.DisplayName} 的 {requested} 个可见窗口已正常关闭。浏览器后台进程可能按其设置继续常驻，不影响关闭结果。");
+        }
+
+        _log(
+            $"应用关闭请求未完全完成：{app.DisplayName}，已请求 {requested} 个窗口，仍显示 {remaining} 个窗口，"
+            + $"权限拒绝 {accessDenied} 个窗口，其他失败 {otherFailures} 个窗口。");
+        if ((accessDenied > 0 || remaining == windows.Count) && !WindowsInputAccess.IsElevated)
+        {
+            return ToolExecutionResult.Fail(
+                $"已请求关闭 {app.DisplayName}，但仍有 {remaining} 个窗口未关闭。若浏览器以管理员身份运行，请在路遥智控“授权管理”中点击“管理员模式重启”后重试；程序没有强杀进程。");
+        }
+
+        return ToolExecutionResult.Fail(
+            $"已请求关闭 {app.DisplayName}，但仍有 {remaining} 个窗口在显示。浏览器可能正在询问是否关闭多个标签页、保存下载或确认退出，请按画面确认；程序没有强杀进程。");
+    }
+
+    private static IReadOnlyList<IntPtr> FindClosableWindows(
+        IReadOnlyList<string> processNames,
+        bool includeAllTopLevelWindows)
+    {
+        var processIds = new HashSet<uint>();
+        var mainWindows = new HashSet<IntPtr>();
+        foreach (var processName in processNames)
         {
             foreach (var process in Process.GetProcessesByName(processName))
             {
@@ -1291,26 +1469,58 @@ internal sealed class WindowsController
                 {
                     try
                     {
-                        if (process.CloseMainWindow())
+                        process.Refresh();
+                        if (process.Id == Environment.ProcessId)
                         {
-                            requested++;
+                            continue;
+                        }
+                        processIds.Add((uint)process.Id);
+                        if (process.MainWindowHandle != IntPtr.Zero && IsWindowVisible(process.MainWindowHandle))
+                        {
+                            mainWindows.Add(process.MainWindowHandle);
                         }
                     }
                     catch
                     {
-                        // Continue checking other user-visible instances.
+                        // Elevated processes can hide some details; EnumWindows may still expose their handles.
                     }
                 }
             }
         }
 
-        if (requested == 0)
+        if (!includeAllTopLevelWindows || processIds.Count == 0)
         {
-            return ToolExecutionResult.Fail($"没有找到可正常关闭的 {app.DisplayName} 窗口；程序可能未运行或权限更高。");
+            return mainWindows.ToArray();
         }
 
-        _log($"已请求关闭应用：{app.DisplayName}");
-        return ToolExecutionResult.Ok($"已请求 {app.DisplayName} 正常关闭，共 {requested} 个窗口。");
+        var browserWindows = new HashSet<IntPtr>(mainWindows);
+        EnumWindows((windowHandle, _) =>
+        {
+            if (!IsWindowVisible(windowHandle))
+            {
+                return true;
+            }
+
+            GetWindowThreadProcessId(windowHandle, out var processId);
+            if (!processIds.Contains(processId))
+            {
+                return true;
+            }
+
+            var rootOwner = GetAncestor(windowHandle, GetAncestorRootOwner);
+            if (rootOwner != IntPtr.Zero && rootOwner != windowHandle)
+            {
+                return true;
+            }
+
+            if (GetWindowTextLength(windowHandle) > 0 || mainWindows.Contains(windowHandle))
+            {
+                browserWindows.Add(windowHandle);
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        return browserWindows.ToArray();
     }
 
     private async Task<ToolExecutionResult> NeteaseMusicTaskAsync(
@@ -2863,6 +3073,14 @@ internal sealed class WindowsController
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(
+        IntPtr windowHandle,
+        uint message,
+        UIntPtr wParam,
+        IntPtr lParam);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

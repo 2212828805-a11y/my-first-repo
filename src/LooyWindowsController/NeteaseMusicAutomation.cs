@@ -29,6 +29,56 @@ internal static class NeteaseMusicAutomation
                || normalized.Contains("neteasecloudmusic", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsNeteaseTarget(
+        string displayName,
+        IReadOnlyList<string> processNames) =>
+        displayName.Contains("网易云", StringComparison.OrdinalIgnoreCase)
+        || processNames.Any(processName =>
+            processName.Equals("cloudmusic", StringComparison.OrdinalIgnoreCase));
+
+    public static IReadOnlyList<Rectangle> GetSearchFocusFallbacks(ScreenSnapshot snapshot)
+    {
+        var window = snapshot.WindowBounds;
+        if (window.Width < 560 || window.Height < 360)
+        {
+            return Array.Empty<Rectangle>();
+        }
+
+        // 网易云 2.x 与 3.x 都把全局搜索框放在窗口顶部，但空框、旧关键词
+        // 或深色主题下不一定会被 Windows OCR 识别。这里仅在已确认前台进程
+        // 是 cloudmusic 时使用两个保守的顶部候选区；每次输入后仍必须 OCR
+        // 核对搜索词，核对失败就撤销并尝试下一个位置，绝不直接提交。
+        var y = window.Top + Math.Clamp(
+            (int)Math.Round(window.Height * 0.065),
+            34,
+            64);
+        var fieldWidth = Math.Clamp(
+            (int)Math.Round(window.Width * 0.25),
+            180,
+            360);
+        var fieldHeight = Math.Clamp(
+            (int)Math.Round(window.Height * 0.055),
+            34,
+            52);
+        var centerRatios = window.Width >= 900
+            ? new[] { 0.36d, 0.47d }
+            : new[] { 0.40d, 0.52d };
+
+        return centerRatios
+            .Select(ratio =>
+            {
+                var centerX = window.Left + (int)Math.Round(window.Width * ratio);
+                return Rectangle.FromLTRB(
+                    Math.Max(window.Left + 12, centerX - fieldWidth / 2),
+                    Math.Max(window.Top + 12, y - fieldHeight / 2),
+                    Math.Min(window.Right - 12, centerX + fieldWidth / 2),
+                    Math.Min(window.Top + (int)(window.Height * 0.15), y + fieldHeight / 2));
+            })
+            .Where(bounds => bounds.Width >= 100 && bounds.Height >= 24)
+            .Distinct()
+            .ToArray();
+    }
+
     public static ScreenTextItem? FindResultItem(
         ScreenSnapshot snapshot,
         int resultNumber,
@@ -155,8 +205,15 @@ internal static class NeteaseMusicAutomation
         var second = FindResultItem(snapshot, 2, "晴天");
         var clickPoint = second is null ? Point.Empty : ResolveResultClickPoint(snapshot, second);
         var expectedTitlePoint = new Point(225, 320);
+        var searchFallbacks = GetSearchFocusFallbacks(snapshot);
         return ShouldRejectWebSearch("打开网易云音乐", false)
                && !ShouldRejectWebSearch("网页搜索网易云音乐", true)
+               && IsNeteaseTarget("网易云音乐", ["cloudmusic"])
+               && searchFallbacks.Count == 2
+               && searchFallbacks.All(bounds =>
+                   bounds.Top >= snapshot.WindowBounds.Top
+                   && bounds.Bottom <= snapshot.WindowBounds.Top + snapshot.WindowBounds.Height * 0.15
+                   && snapshot.WindowBounds.Contains(Center(bounds)))
                && second?.Index == 3
                && clickPoint == expectedTitlePoint
                && second.Bounds.Contains(clickPoint);

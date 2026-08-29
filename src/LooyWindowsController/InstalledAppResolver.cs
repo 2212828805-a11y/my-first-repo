@@ -5,6 +5,19 @@ namespace Looy.WindowsController;
 
 internal static class InstalledAppResolver
 {
+    private static readonly HashSet<string> MultiWindowBrowserProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "msedge",
+        "chrome",
+        "firefox",
+        "brave",
+        "vivaldi",
+        "opera",
+        "opera_gx",
+        "360chrome",
+        "360se"
+    };
+
     private sealed record AppSpec(
         string[] ExecutableNames,
         string[] ProcessNames,
@@ -59,6 +72,16 @@ internal static class InstalledAppResolver
             ["记事本", "Notepad"],
             [@"%WINDIR%\System32\notepad.exe"],
             ["activate", "new_document", "write_text", "new_and_write"]),
+        ["edge"] = new(
+            ["msedge.exe"],
+            ["msedge"],
+            ["Microsoft Edge", "Edge"],
+            [
+                @"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+                @"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+                @"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"
+            ],
+            ["activate"]),
         ["chrome"] = new(
             ["chrome.exe"],
             ["chrome"],
@@ -256,6 +279,34 @@ internal static class InstalledAppResolver
 
     public static bool IsProtocol(string target) =>
         target.Contains(':') && !Path.IsPathRooted(target);
+
+    public static bool IsMultiWindowBrowser(IReadOnlyList<string> processNames) =>
+        processNames.Any(processName =>
+            MultiWindowBrowserProcesses.Contains(Path.GetFileNameWithoutExtension(processName.Trim())));
+
+    internal static bool RunCloseRoutingSelfTest()
+    {
+        var edge = new AppEntry
+        {
+            Alias = "edge",
+            DisplayName = "Microsoft Edge",
+            Target = "microsoft-edge:"
+        };
+        var customFirefox = new AppEntry
+        {
+            Alias = "my_browser",
+            DisplayName = "Firefox",
+            Target = @"C:\Program Files\Mozilla Firefox\firefox.exe"
+        };
+        var edgeProcesses = GetProcessNames(edge);
+        var firefoxProcesses = GetProcessNames(customFirefox);
+
+        return edgeProcesses.Contains("msedge", StringComparer.OrdinalIgnoreCase)
+               && IsMultiWindowBrowser(edgeProcesses)
+               && firefoxProcesses.Contains("firefox", StringComparer.OrdinalIgnoreCase)
+               && IsMultiWindowBrowser(firefoxProcesses)
+               && !IsMultiWindowBrowser(["explorer"]);
+    }
 
     private static IReadOnlyList<string> BuildExecutableNames(string target, AppSpec? spec)
     {

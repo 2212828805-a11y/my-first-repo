@@ -39,7 +39,7 @@ internal static class ToolCatalog
                     Required("app", "string", "应用别名，例如 notepad、edge、wechat。"))));
             tools.Add(Tool(
                 "windows.close_app",
-                "请求白名单中的桌面应用正常关闭，不会强制结束进程。",
+                "请求白名单中的桌面应用正常关闭，不会强制结束进程。Chrome、Edge 等多窗口浏览器会逐一关闭真实顶层窗口并复核；如果目标权限更高，会明确提示用户切换管理员模式。",
                 Properties(
                     Required("app", "string", "应用别名。"))));
             tools.Add(Tool(
