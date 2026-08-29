@@ -5,7 +5,7 @@
 ## 用户实际怎么用
 
 1. 解压 `LooyWindowsController-win-x64.zip`。
-2. 双击 `LooyWindowsController.exe`。
+2. 双击 `LooyWindowsController.exe`，在欢迎页后输入管理员生成的激活码，并主动勾选同意隐私说明。
 3. 在小智智控台打开对应智能体的“编辑功能”，复制 MCP 接入点地址。
 4. 将形如下面的完整地址粘贴进程序：
 
@@ -93,7 +93,7 @@ QQ/微信消息必须先调用 windows.prepare_chat_message；该工具只填入
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.6.2.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.7.0.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -131,9 +131,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.6.2` 的标签。
+- 推送形如 `v0.7.0` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.6.2` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.7.0` artifact 即可。
 
 ## 默认应用列表
 
@@ -155,6 +155,8 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 
 0.6.2 增加路遥智伴欢迎页，并增强网易云音乐 2.x/3.x 搜索框定位：当空框、旧关键词或主题导致 OCR 看不到“搜索”占位文字，程序会在确认前台进程确为 cloudmusic 后依次尝试两个顶部安全候选区；每次都先输入、再 OCR 核对，失败即撤销，只有核对成功才提交。同步修复 Edge 协议启动后无法定位真实进程的问题；Chrome、Edge 等多窗口浏览器会逐一请求正常关闭并等待复核，后台常驻不再误报失败，权限级别不一致时会提示使用已有管理员模式，不会强杀进程。收费与设备管理能力预留在独立后台，收费总开关默认关闭。
 
+0.7.0 正式接入路遥智伴设备管理后台。首次启动时会在欢迎页之后显示设备绑定窗口，只有用户阅读并勾选隐私说明、输入有效激活码后才进入主程序。每台电脑生成独立 P-256 设备密钥，私钥与授权凭证由 Windows 当前用户加密保存；联网请求带时间戳、随机数和签名，防止复制凭证或重放请求。程序每 15 分钟复核一次授权，后台封禁、激活码停用或到期会停止连接；授权服务短暂不可用时，从最后成功校验起最多允许 72 小时离线宽限。
+
 0.6.2 的正式构建还会执行基础代码混淆、字符串隐藏和 IL 优化，不打包源码、PDB 或混淆映射。它能明显增加直接复制和反编译修改的难度，但任何交付到用户电脑的软件都无法保证绝对不可逆向；真正用于验证发布者与发现二次篡改仍需配置受信任的 Windows 代码签名证书。
 
 应用配置和加密后的 MCP 地址保存在：
@@ -162,6 +164,14 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 ```text
 %LOCALAPPDATA%\LOOY\WindowsController\settings.json
 ```
+
+设备公钥、Windows 加密后的私钥和授权凭证保存在：
+
+```text
+%LOCALAPPDATA%\LOOY\WindowsController\device-license.json
+```
+
+不要删除或复制该文件。删除后会生成新的设备身份，并可能额外占用激活码的设备名额。
 
 截图保存在：
 
@@ -180,6 +190,7 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 ## 当前限制
 
 - 电脑休眠、关机、断网或程序退出后无法接收调用。
+- 首次设备绑定必须联网；绑定后授权服务短暂不可用时最多使用 72 小时离线宽限。
 - 普通输入模式无法控制管理员权限窗口；用户可在授权管理页手动确认并切换管理员输入模式，但 UAC 安全桌面仍无法自动操作。
 - 部分游戏、反作弊软件和安全软件会阻止模拟输入。
 - 目前是 Windows x64 版本，暂未打包 ARM64。

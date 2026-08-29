@@ -77,6 +77,12 @@ internal static class Program
 #endif
             return;
         }
+        if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-device-license", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = DeviceLicenseClient.RunComponentSelfTest() ? 0 : 87;
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -100,7 +106,20 @@ internal static class Program
             welcomeForm.ShowDialog();
         }
 
-        Application.Run(new MainForm());
+        try
+        {
+            using var licenseClient = new DeviceLicenseClient();
+            using var activationForm = new ActivationForm(licenseClient);
+            if (activationForm.ShowDialog() != DialogResult.OK)
+            {
+                return;
+            }
+            Application.Run(new MainForm(licenseClient));
+        }
+        catch (Exception exception)
+        {
+            ShowFatalError(exception);
+        }
     }
 
     private static void ShowFatalError(Exception exception)

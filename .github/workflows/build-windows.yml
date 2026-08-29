@@ -13,6 +13,7 @@ on:
       - feature/source-controls-v0.6.0
       - fix/control-smoothness-v0.6.1
       - feature/startup-welcome-v0.6.2
+      - feature/device-binding-v0.7.0
     tags:
       - "v*"
 
@@ -70,6 +71,18 @@ jobs:
             if ($process.ExitCode -ne 0) {
               throw "Release self-test $argument failed with exit code $($process.ExitCode)"
             }
+          }
+
+      - name: Verify device identity and request signing
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-device-license" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Device license self-test failed with exit code $($process.ExitCode)"
           }
 
       - name: Verify Windows native input engine
@@ -167,8 +180,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.6.2
+          name: LooyWindowsController-Windows-v0.7.0
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.6.2.exe
+            dist/installer/LooyWindowsController-Setup-0.7.0.exe
           if-no-files-found: error

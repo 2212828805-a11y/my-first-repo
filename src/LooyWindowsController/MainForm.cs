@@ -11,6 +11,8 @@ internal sealed class MainForm : Form
     private readonly BindingList<AppEntry> _apps;
     private readonly WindowsController _windowsController;
     private readonly McpEndpointClient _mcpClient;
+    private readonly DeviceLicenseClient _licenseClient;
+    private readonly System.Windows.Forms.Timer _licenseTimer = new();
 
     private readonly TextBox _endpointBox = new();
     private readonly CheckBox _showEndpointBox = new() { Text = "显示连接地址", AutoSize = true };
@@ -21,6 +23,7 @@ internal sealed class MainForm : Form
     private readonly Button _disconnectButton = new() { Text = "暂时断开", Width = 106, Height = 38, Enabled = false };
     private readonly Button _emergencyButton = new() { Text = "立即停用", Width = 106, Height = 38 };
     private readonly Label _statusLabel = new() { Text = "● 等待连接", AutoSize = true };
+    private readonly Label _licenseStatusLabel = new() { Text = "● 授权有效", AutoSize = true };
     private readonly RichTextBox _logBox = new();
     private readonly DataGridView _appsGrid = new();
     private readonly Dictionary<string, CheckBox> _permissionBoxes = new();
@@ -33,9 +36,12 @@ internal sealed class MainForm : Form
     private bool _initializing = true;
     private bool _emergencyStopped;
     private bool _closingAfterStop;
+    private bool _licenseCheckRunning;
+    private bool _licenseBlocked;
 
-    public MainForm()
+    public MainForm(DeviceLicenseClient licenseClient)
     {
+        _licenseClient = licenseClient;
         _settingsStore = new SettingsStore();
         _settings = _settingsStore.Load();
         _apps = new BindingList<AppEntry>(_settings.Apps.Select(app => app.Clone()).ToList());
@@ -54,13 +60,15 @@ internal sealed class MainForm : Form
         BuildWindow();
         ApplySettingsToUi();
         WireEvents();
+        _licenseTimer.Interval = checked(_licenseClient.NextCheckSeconds * 1000);
         _initializing = false;
-        WriteLog("路遥智控 0.6.2 已启动。连接密钥不会显示在运行记录中。");
+        WriteLog("路遥智控 0.7.0 已启动。连接密钥和设备私钥不会显示在运行记录中。");
+        WriteLog($"设备授权：{_licenseClient.StatusText}（{_licenseClient.DeviceIdHint}）。");
     }
 
     private void BuildWindow()
     {
-        Text = "路遥智控 · LOOY v0.6.2";
+        Text = "路遥智控 · LOOY v0.7.0";
         Width = 1040;
         Height = 760;
         MinimumSize = new Size(900, 680);
@@ -89,7 +97,7 @@ internal sealed class MainForm : Form
         };
         titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
         titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+        titlePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
         var brandMark = new BrandMarkControl { Anchor = AnchorStyles.Left };
         titlePanel.Controls.Add(brandMark, 0, 0);
 
@@ -125,6 +133,12 @@ internal sealed class MainForm : Form
         _statusLabel.BackColor = AppTheme.Surface;
         _statusLabel.Padding = new Padding(14, 9, 14, 9);
         statePanel.Controls.Add(_statusLabel);
+        _licenseStatusLabel.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+        _licenseStatusLabel.ForeColor = AppTheme.Success;
+        _licenseStatusLabel.BackColor = AppTheme.Surface;
+        _licenseStatusLabel.Padding = new Padding(14, 9, 14, 9);
+        _licenseStatusLabel.Text = $"● {_licenseClient.StatusText}";
+        statePanel.Controls.Add(_licenseStatusLabel);
         titlePanel.Controls.Add(statePanel, 2, 0);
         root.Controls.Add(titlePanel, 0, 0);
 
@@ -568,6 +582,7 @@ internal sealed class MainForm : Form
         _inputAccessButton.Click += InputAccessButton_Click;
         _elevateButton.Click += ElevateButton_Click;
         _inputTestButton.Click += InputTestButton_Click;
+        _licenseTimer.Tick += LicenseTimer_Tick;
         Shown += MainForm_Shown;
         FormClosing += MainForm_FormClosing;
     }
@@ -588,6 +603,74 @@ internal sealed class MainForm : Form
         {
             WriteLog("管理员输入模式已开启。UAC 安全窗口仍需要你本人确认。");
         }
+
+        _licenseTimer.Start();
+    }
+
+    private async void LicenseTimer_Tick(object? sender, EventArgs eventArgs)
+    {
+        if (_licenseCheckRunning || _licenseBlocked || IsDisposed || Disposing)
+        {
+            return;
+        }
+
+        _licenseCheckRunning = true;
+        _licenseTimer.Stop();
+        try
+        {
+            var result = await _licenseClient.CheckAsync(allowOfflineGrace: true);
+            UpdateLicenseStatus(result);
+            if (!result.Allowed)
+            {
+                await StopForLicenseFailureAsync(result.Message);
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteLog($"设备授权复核失败：{exception.Message}");
+        }
+        finally
+        {
+            _licenseCheckRunning = false;
+            if (!_licenseBlocked && !IsDisposed && !Disposing)
+            {
+                _licenseTimer.Interval = checked(_licenseClient.NextCheckSeconds * 1000);
+                _licenseTimer.Start();
+            }
+        }
+    }
+
+    private void UpdateLicenseStatus(DeviceLicenseCheckResult result)
+    {
+        _licenseStatusLabel.Text = result.Allowed
+            ? result.UsedOfflineGrace ? "● 离线宽限" : $"● {_licenseClient.StatusText}"
+            : "● 授权不可用";
+        _licenseStatusLabel.ForeColor = result.Allowed
+            ? result.UsedOfflineGrace ? AppTheme.Warning : AppTheme.Success
+            : AppTheme.Danger;
+        if (result.UsedOfflineGrace)
+        {
+            WriteLog(result.Message);
+        }
+    }
+
+    private async Task StopForLicenseFailureAsync(string message)
+    {
+        if (_licenseBlocked)
+        {
+            return;
+        }
+        _licenseBlocked = true;
+        _emergencyStopped = true;
+        _connectButton.Enabled = false;
+        _licenseTimer.Stop();
+        await _mcpClient.StopAsync();
+        MessageBox.Show(
+            $"设备授权已停止：\n\n{message}\n\n应用将关闭；处理完成后可重新打开校验。",
+            "设备授权不可用",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
+        Close();
     }
 
     private void ConnectButton_Click(object? sender, EventArgs eventArgs) => ConnectToEndpoint();
@@ -1203,8 +1286,10 @@ internal sealed class MainForm : Form
 
     private async void MainForm_FormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
+        _licenseTimer.Stop();
         if (_closingAfterStop)
         {
+            _licenseTimer.Dispose();
             return;
         }
 
@@ -1212,6 +1297,7 @@ internal sealed class MainForm : Form
         SaveSettingsSafe();
         await _mcpClient.StopAsync();
         await _mcpClient.DisposeAsync();
+        _licenseTimer.Dispose();
         _closingAfterStop = true;
         Close();
     }
