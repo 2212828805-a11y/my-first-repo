@@ -200,7 +200,7 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.0",
+            "0.7.1",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
@@ -431,7 +431,7 @@ internal sealed class DeviceLicenseClient : IDisposable
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
                 .InformationalVersion;
             return string.IsNullOrWhiteSpace(informational)
-                ? "0.7.0"
+                ? "0.7.1"
                 : informational.Split('+')[0];
         }
     }

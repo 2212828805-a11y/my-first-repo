@@ -68,6 +68,11 @@ internal sealed class WindowsController
         double RelativeY,
         DateTimeOffset CreatedAt);
 
+    private sealed record SearchFocusAttempt(
+        ToolExecutionResult Result,
+        VerifiedSearchInput? Input,
+        bool CanTryNext);
+
     internal static bool IsNativeInputLayoutValid =>
         Marshal.SizeOf<Input>() == (IntPtr.Size == 8 ? ExpectedInputSizeX64 : ExpectedInputSizeX86);
 
@@ -627,206 +632,261 @@ internal sealed class WindowsController
 
         await Task.Delay(120, cancellationToken);
         var initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
-        var searchField = ScreenAutomationHeuristics.FindSearchField(initial);
-        var focused = false;
-        if (searchField is not null)
+        var candidates = new List<SearchFocusCandidate>();
+        var remembered = GetRememberedSearchFieldCandidate(displayName, initial);
+        if (remembered is not null)
         {
-            var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
-            if (!focusResult.Success)
-            {
-                return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
-            }
-            focused = true;
+            candidates.Add(remembered);
         }
-        else
-        {
-            var rememberedFocus = FocusRememberedSearchField(displayName, initial);
-            if (rememberedFocus is { } rememberedResult)
-            {
-                if (!rememberedResult.Success)
-                {
-                    return (rememberedResult, null);
-                }
-                focused = true;
-            }
-        }
+        candidates.AddRange(ScreenAutomationHeuristics.GetSearchFocusCandidates(
+            initial,
+            displayName,
+            processNames));
 
-        if (!focused)
+        var attemptedPoints = new List<Point>();
+        foreach (var candidate in candidates)
         {
-            // QQ、微信和网易云在第一次搜索后会用旧关键词替换“搜索”
-            // 占位文字。Ctrl+F 可以聚焦应用自己的搜索框；输入后仍会
-            // 通过 OCR 在窗口顶部复核，复核失败则撤销本次输入。
-            var revealResult = PressHotkey("ctrl+f");
-            if (!revealResult.Success)
+            var point = Center(candidate.Bounds);
+            if (attemptedPoints.Any(previous =>
+                    Math.Abs(previous.X - point.X) <= 18
+                    && Math.Abs(previous.Y - point.Y) <= 18))
             {
-                return (revealResult, null);
+                continue;
             }
-            await Task.Delay(180, cancellationToken);
-            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
-            {
-                return (ToolExecutionResult.Fail($"{displayName} 在显示搜索框时失去前台，已停止输入。"), null);
-            }
+            attemptedPoints.Add(point);
 
-            initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
-            searchField = ScreenAutomationHeuristics.FindSearchField(initial);
-            if (searchField is not null)
+            var attempt = await TrySearchFocusCandidateAsync(
+                displayName,
+                handle,
+                processNames,
+                query,
+                initial,
+                candidate,
+                cancellationToken);
+            if (attempt.Input is not null)
             {
-                var focusResult = await ClickRecognizedItemAsync(initial, searchField, 1, cancellationToken);
-                if (!focusResult.Success)
-                {
-                    return (ToolExecutionResult.Fail($"无法安全聚焦 {displayName} 的搜索框：{focusResult.Message}"), null);
-                }
+                RememberSearchField(displayName, attempt.Input.Snapshot, attempt.Input.OriginalField.Bounds);
+                _log($"{displayName} 已通过{candidate.Source}聚焦输入，并在该区域核对搜索词。");
+                return (attempt.Result, attempt.Input);
             }
-            else if (!SupportsDirectSearchShortcut(displayName, processNames))
+            if (!attempt.CanTryNext)
             {
-                return (ToolExecutionResult.Fail(
-                    $"屏幕上没有识别到 {displayName} 的搜索框。为避免把文字输入错误位置，没有继续操作。"), null);
+                return (attempt.Result, null);
             }
         }
 
-        await Task.Delay(80, cancellationToken);
+        // QQ、微信和网易云支持应用内搜索快捷键。它是候选区之外的
+        // 最后手段，并且不会再点击屏幕上的“搜索”文字；输入后仍只在
+        // 窗口顶部核对，失败就撤销且绝不提交。
+        if (SupportsDirectSearchShortcut(displayName, processNames))
+        {
+            var shortcutAttempt = await TryDirectSearchShortcutAsync(
+                displayName,
+                handle,
+                processNames,
+                query,
+                cancellationToken);
+            if (shortcutAttempt.Input is not null)
+            {
+                RememberSearchField(
+                    displayName,
+                    shortcutAttempt.Input.Snapshot,
+                    shortcutAttempt.Input.OriginalField.Bounds);
+                _log($"{displayName} 已通过应用内搜索快捷键聚焦输入，并完成顶部区域核对。");
+                return (shortcutAttempt.Result, shortcutAttempt.Input);
+            }
+            if (!shortcutAttempt.CanTryNext)
+            {
+                return (shortcutAttempt.Result, null);
+            }
+        }
+
+        var profile = NeteaseMusicAutomation.IsNeteaseTarget(displayName, processNames)
+            ? "网易云"
+            : displayName;
+        return (ToolExecutionResult.Fail(
+            $"{profile} 的搜索框没有显示“搜索”文字，程序已改用窗口候选输入区和应用快捷键逐一尝试，但没有在候选框内核对到“{query}”。所有试输入均已撤销，没有点击搜索按钮或按回车。请保持主窗口可见并恢复正常缩放后重试。"), null);
+    }
+
+    private async Task<SearchFocusAttempt> TrySearchFocusCandidateAsync(
+        string displayName,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string query,
+        ScreenSnapshot initial,
+        SearchFocusCandidate candidate,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!EnsureExactTargetIsForeground(handle, processNames)
+            || !ScreenRecognitionService.TryGetWindowBounds(handle, out var currentBounds)
+            || !ScreenRecognitionService.WindowBoundsMatch(initial.WindowBounds, currentBounds))
+        {
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail($"{displayName} 的窗口在定位搜索框时发生变化，已停止输入。"),
+                null,
+                false);
+        }
+
+        var point = Center(candidate.Bounds);
+        if (!initial.WindowBounds.Contains(point))
+        {
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail("搜索输入候选点超出应用窗口，已跳过。"),
+                null,
+                true);
+        }
+
+        var moveResult = MoveMouse(point.X, point.Y);
+        if (!moveResult.Success)
+        {
+            return new SearchFocusAttempt(moveResult, null, false);
+        }
         if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
         {
-            return (ToolExecutionResult.Fail($"{displayName} 的搜索框聚焦后窗口发生变化，已停止输入。"), null);
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail($"{displayName} 在鼠标移动后失去前台，已取消搜索。"),
+                null,
+                false);
+        }
+
+        // A single down/up pair is intentional. Never hold, double-click, or
+        // click the OCR text label while trying to focus a search field.
+        var clickResult = SendMouseButton("left", 1);
+        if (!clickResult.Success)
+        {
+            return new SearchFocusAttempt(clickResult, null, false);
+        }
+        await Task.Delay(110, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail($"{displayName} 的候选搜索框聚焦后失去前台，已停止输入。"),
+                null,
+                false);
         }
 
         var selectAllResult = PressHotkey("ctrl+a");
         if (!selectAllResult.Success)
         {
-            return (selectAllResult, null);
+            return new SearchFocusAttempt(selectAllResult, null, false);
         }
         await Task.Delay(40, cancellationToken);
         var typeResult = TypeText(query);
         if (!typeResult.Success)
         {
-            return (typeResult, null);
+            return new SearchFocusAttempt(typeResult, null, false);
         }
 
         var verification = await WaitForSearchTextAsync(
             handle,
             query,
-            searchField?.Bounds,
-            SupportsDirectSearchShortcut(displayName, processNames),
-            cancellationToken);
-        if (verification.Snapshot is null || verification.Item is null)
+            candidate.Bounds,
+            allowTopRegion: false,
+            cancellationToken: cancellationToken);
+        if (verification.Snapshot is not null && verification.Item is not null)
         {
-            if (ScreenRecognitionService.IsExactForegroundWindow(handle))
-            {
-                // Ctrl+Z restores the previous search text or draft if a shortcut
-                // unexpectedly focused the wrong editor. Nothing is submitted.
-                PressHotkey("ctrl+z");
-            }
-
-            if (NeteaseMusicAutomation.IsNeteaseTarget(displayName, processNames))
-            {
-                var neteaseFallback = await TryNeteaseSearchFallbackAsync(
-                    handle,
-                    processNames,
-                    query,
-                    initial,
-                    cancellationToken);
-                if (neteaseFallback.Snapshot is not null
-                    && neteaseFallback.Item is not null
-                    && neteaseFallback.Field is not null)
-                {
-                    verification = (neteaseFallback.Snapshot, neteaseFallback.Item);
-                    searchField = neteaseFallback.Field;
-                    _log("网易云搜索框未被 OCR 直接识别，已通过顶部候选区输入并完成二次文字核对。");
-                }
-                else
-                {
-                    return (ToolExecutionResult.Fail(
-                        $"网易云搜索框的文字和快捷键都没有被可靠识别；已尝试两个安全顶部位置，但均未在输入区核对到“{query}”。所有试输入均已撤销，没有提交搜索。请将网易云主窗口最大化后重试。"), null);
-                }
-            }
-            else
-            {
-                return (ToolExecutionResult.Fail(
-                    $"已经尝试在 {displayName} 聚焦搜索框，但屏幕没有在顶部搜索区域核对到“{query}”。本次输入已撤销，没有点击搜索或按回车。"), null);
-            }
+            var field = new ScreenTextItem(
+                verification.Item.Index,
+                candidate.Source,
+                candidate.Bounds);
+            var input = new VerifiedSearchInput(verification.Snapshot, field, verification.Item);
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
+                input,
+                false);
         }
 
-        var typedQuery = verification.Item!;
-        var verifiedSnapshot = verification.Snapshot!;
-        searchField ??= new ScreenTextItem(typedQuery.Index, "搜索框", typedQuery.Bounds);
-        RememberSearchField(displayName, verifiedSnapshot, typedQuery.Bounds);
-        return (
-            ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
-            new VerifiedSearchInput(verifiedSnapshot, searchField, typedQuery));
+        await UndoUnverifiedSearchInputAsync(handle, cancellationToken);
+        return new SearchFocusAttempt(
+            ToolExecutionResult.Fail($"{candidate.Source}没有核对到搜索词，已撤销本次试输入。"),
+            null,
+            true);
     }
 
-    private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item, ScreenTextItem? Field)>
-        TryNeteaseSearchFallbackAsync(
-            IntPtr handle,
-            IReadOnlyList<string> processNames,
-            string query,
-            ScreenSnapshot initial,
-            CancellationToken cancellationToken)
+    private async Task<SearchFocusAttempt> TryDirectSearchShortcutAsync(
+        string displayName,
+        IntPtr handle,
+        IReadOnlyList<string> processNames,
+        string query,
+        CancellationToken cancellationToken)
     {
-        PressHotkey("escape");
-        foreach (var bounds in NeteaseMusicAutomation.GetSearchFocusFallbacks(initial))
+        if (!EnsureExactTargetIsForeground(handle, processNames))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!EnsureExactTargetIsForeground(handle, processNames))
-            {
-                return (null, null, null);
-            }
-
-            var point = new Point(
-                bounds.Left + bounds.Width / 2,
-                bounds.Top + bounds.Height / 2);
-            var moveResult = MoveMouse(point.X, point.Y);
-            if (!moveResult.Success)
-            {
-                continue;
-            }
-            var clickResult = SendMouseButton("left", 1);
-            if (!clickResult.Success)
-            {
-                continue;
-            }
-
-            await Task.Delay(120, cancellationToken);
-            if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
-            {
-                return (null, null, null);
-            }
-            var selectAllResult = PressHotkey("ctrl+a");
-            if (!selectAllResult.Success)
-            {
-                continue;
-            }
-            await Task.Delay(40, cancellationToken);
-            var typeResult = TypeText(query);
-            if (!typeResult.Success)
-            {
-                continue;
-            }
-
-            var verification = await WaitForSearchTextAsync(
-                handle,
-                query,
-                bounds,
-                allowTopRegion: true,
-                cancellationToken: cancellationToken);
-            if (verification.Snapshot is not null && verification.Item is not null)
-            {
-                var field = new ScreenTextItem(
-                    verification.Item.Index,
-                    "网易云搜索框",
-                    bounds);
-                return (verification.Snapshot, verification.Item, field);
-            }
-
-            if (ScreenRecognitionService.IsExactForegroundWindow(handle))
-            {
-                PressHotkey("ctrl+z");
-                PressHotkey("escape");
-                await Task.Delay(100, cancellationToken);
-            }
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail($"{displayName} 没有保持在前台，未调用搜索快捷键。"),
+                null,
+                false);
         }
 
-        return (null, null, null);
+        var shortcutResult = PressHotkey("ctrl+f");
+        if (!shortcutResult.Success)
+        {
+            return new SearchFocusAttempt(shortcutResult, null, false);
+        }
+        await Task.Delay(180, cancellationToken);
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Fail($"{displayName} 在调用搜索快捷键后失去前台，已停止输入。"),
+                null,
+                false);
+        }
+
+        var selectAllResult = PressHotkey("ctrl+a");
+        if (!selectAllResult.Success)
+        {
+            return new SearchFocusAttempt(selectAllResult, null, false);
+        }
+        await Task.Delay(40, cancellationToken);
+        var typeResult = TypeText(query);
+        if (!typeResult.Success)
+        {
+            return new SearchFocusAttempt(typeResult, null, false);
+        }
+
+        var verification = await WaitForSearchTextAsync(
+            handle,
+            query,
+            expectedBounds: null,
+            allowTopRegion: true,
+            cancellationToken: cancellationToken);
+        if (verification.Snapshot is not null && verification.Item is not null)
+        {
+            var bounds = Rectangle.Intersect(
+                Rectangle.Inflate(verification.Item.Bounds, 28, 14),
+                verification.Snapshot.WindowBounds);
+            var field = new ScreenTextItem(
+                verification.Item.Index,
+                "应用内搜索快捷键输入区",
+                bounds);
+            return new SearchFocusAttempt(
+                ToolExecutionResult.Ok($"已在 {displayName} 的搜索框中输入并核对“{query}”，尚未提交。"),
+                new VerifiedSearchInput(verification.Snapshot, field, verification.Item),
+                false);
+        }
+
+        await UndoUnverifiedSearchInputAsync(handle, cancellationToken);
+        return new SearchFocusAttempt(
+            ToolExecutionResult.Fail($"{displayName} 的应用内搜索快捷键未在顶部输入区核对到“{query}”，已撤销。"),
+            null,
+            true);
+    }
+
+    private async Task UndoUnverifiedSearchInputAsync(
+        IntPtr handle,
+        CancellationToken cancellationToken)
+    {
+        if (!ScreenRecognitionService.IsExactForegroundWindow(handle))
+        {
+            return;
+        }
+
+        // Undo restores the previous field value when the candidate was an edit
+        // control. Escape also clears any transient browser page selection.
+        PressHotkey("ctrl+z");
+        PressHotkey("escape");
+        await Task.Delay(90, cancellationToken);
     }
 
     private async Task<(ScreenSnapshot? Snapshot, ScreenTextItem? Item)> WaitForSearchTextAsync(
@@ -914,7 +974,9 @@ internal sealed class WindowsController
         return (snapshot, selected);
     }
 
-    private ToolExecutionResult? FocusRememberedSearchField(string displayName, ScreenSnapshot snapshot)
+    private SearchFocusCandidate? GetRememberedSearchFieldCandidate(
+        string displayName,
+        ScreenSnapshot snapshot)
     {
         if (!_searchFieldHints.TryGetValue(displayName, out var hint)
             || DateTimeOffset.Now - hint.CreatedAt > TimeSpan.FromHours(12))
@@ -925,19 +987,29 @@ internal sealed class WindowsController
         var x = snapshot.WindowBounds.Left + (int)Math.Round(snapshot.WindowBounds.Width * hint.RelativeX);
         var y = snapshot.WindowBounds.Top + (int)Math.Round(snapshot.WindowBounds.Height * hint.RelativeY);
         var point = new Point(x, y);
-        var safeTopRegion = new Rectangle(
-            snapshot.WindowBounds.Left,
-            snapshot.WindowBounds.Top,
-            snapshot.WindowBounds.Width,
-            (int)(snapshot.WindowBounds.Height * 0.28));
+        var safeTopRegion = Rectangle.FromLTRB(
+            snapshot.WindowBounds.Left + 10,
+            snapshot.WindowBounds.Top + 10,
+            snapshot.WindowBounds.Right - 10,
+            snapshot.WindowBounds.Top + (int)(snapshot.WindowBounds.Height * 0.28));
         if (!safeTopRegion.Contains(point))
         {
             _searchFieldHints.Remove(displayName);
             return null;
         }
 
-        var moveResult = MoveMouse(point.X, point.Y);
-        return moveResult.Success ? SendMouseButton("left", 1) : moveResult;
+        var width = Math.Clamp((int)Math.Round(snapshot.WindowBounds.Width * 0.22), 180, 360);
+        var height = Math.Clamp((int)Math.Round(snapshot.WindowBounds.Height * 0.052), 34, 56);
+        var bounds = Rectangle.Intersect(
+            Rectangle.FromLTRB(
+                point.X - width / 2,
+                point.Y - height / 2,
+                point.X + width / 2,
+                point.Y + height / 2),
+            safeTopRegion);
+        return bounds.Width >= 100 && bounds.Height >= 28
+            ? new SearchFocusCandidate(bounds, "本次运行已核对的搜索区")
+            : null;
     }
 
     private void RememberSearchField(string displayName, ScreenSnapshot snapshot, Rectangle bounds)
@@ -972,6 +1044,9 @@ internal sealed class WindowsController
             || processName.Equals("weixin", StringComparison.OrdinalIgnoreCase)
             || processName.Equals("cloudmusic", StringComparison.OrdinalIgnoreCase));
     }
+
+    private static Point Center(Rectangle bounds) =>
+        new(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
 
     private async Task<ToolExecutionResult> ClickRecognizedItemAsync(
         ScreenSnapshot snapshot,

@@ -2,10 +2,127 @@ namespace Looy.WindowsController;
 
 internal sealed record ComposerTarget(ScreenTextItem Anchor, bool AnchorIsSendButton);
 
+internal sealed record SearchFocusCandidate(Rectangle Bounds, string Source);
+
 internal static class ScreenAutomationHeuristics
 {
     private static readonly string[] SearchWords = ["搜索", "查找", "搜一搜", "search", "find"];
     private static readonly string[] ComposerWords = ["输入消息", "发送消息", "发消息", "说点什么", "请输入消息", "message"];
+
+    public static IReadOnlyList<SearchFocusCandidate> GetSearchFocusCandidates(
+        ScreenSnapshot snapshot,
+        string displayName,
+        IReadOnlyList<string> processNames)
+    {
+        var window = snapshot.WindowBounds;
+        if (window.Width < 480 || window.Height < 320)
+        {
+            return Array.Empty<SearchFocusCandidate>();
+        }
+
+        var candidates = new List<SearchFocusCandidate>();
+        var identity = string.Join(
+            " ",
+            new[] { displayName, snapshot.ProcessName }.Concat(processNames));
+        var isNetease = identity.Contains("cloudmusic", StringComparison.OrdinalIgnoreCase)
+                        || identity.Contains("网易云", StringComparison.OrdinalIgnoreCase);
+        var isQq = processNames.Any(name => name.Equals("qq", StringComparison.OrdinalIgnoreCase))
+                   || snapshot.ProcessName.Equals("qq", StringComparison.OrdinalIgnoreCase)
+                   || displayName.Equals("QQ", StringComparison.OrdinalIgnoreCase);
+        var isWechat = processNames.Any(name =>
+                           name.Equals("wechat", StringComparison.OrdinalIgnoreCase)
+                           || name.Equals("weixin", StringComparison.OrdinalIgnoreCase))
+                       || snapshot.ProcessName.Equals("wechat", StringComparison.OrdinalIgnoreCase)
+                       || snapshot.ProcessName.Equals("weixin", StringComparison.OrdinalIgnoreCase)
+                       || displayName.Contains("微信", StringComparison.OrdinalIgnoreCase);
+        var isNativeDouyin = processNames.Any(name => name.Equals("douyin", StringComparison.OrdinalIgnoreCase))
+                             || snapshot.ProcessName.Equals("douyin", StringComparison.OrdinalIgnoreCase)
+                             || displayName.Contains("抖音", StringComparison.OrdinalIgnoreCase)
+                             || displayName.Contains("douyin", StringComparison.OrdinalIgnoreCase);
+        var isBrowser = IsBrowserProcess(snapshot.ProcessName)
+                        || processNames.Any(IsBrowserProcess);
+        var looksLikeDouyinPage = snapshot.Items.Any(item =>
+            CenterY(item.Bounds) <= window.Top + (int)(window.Height * 0.42)
+            && (Normalize(item.Text).Equals("抖音", StringComparison.OrdinalIgnoreCase)
+                || Normalize(item.Text).Contains("douyin", StringComparison.OrdinalIgnoreCase)));
+
+        if (isNetease)
+        {
+            foreach (var bounds in NeteaseMusicAutomation.GetSearchFocusFallbacks(snapshot))
+            {
+                AddCandidate(candidates, window, bounds, "网易云顶部搜索区");
+            }
+        }
+        else if (isQq || isWechat)
+        {
+            // QQ NT 与微信都把会话搜索放在左侧栏顶部。候选点按窗口
+            // 比例计算，即使占位文字已经被旧关键词替换或 OCR 未识别，
+            // 也不需要点击“搜索”文本。多个候选只会逐个单击、输入和核对。
+            AddRelativeCandidate(candidates, window, 0.14, 0.072, 0.21, 0.052,
+                isQq ? "QQ 左栏搜索区" : "微信左栏搜索区");
+            AddRelativeCandidate(candidates, window, 0.19, 0.072, 0.22, 0.052,
+                isQq ? "QQ 宽版左栏搜索区" : "微信宽版左栏搜索区");
+            AddRelativeCandidate(candidates, window, 0.15, 0.118, 0.22, 0.052,
+                isQq ? "QQ 次级顶部搜索区" : "微信次级顶部搜索区");
+        }
+        else if (isNativeDouyin || (isBrowser && looksLikeDouyinPage))
+        {
+            // 桌面抖音的搜索框位于应用标题栏下方；浏览器页面还要避开
+            // 浏览器自己的地址栏，因此网页候选区更低。候选中心刻意避开
+            // 输入框右侧的“搜索”按钮，防止先提交旧内容或选中整页。
+            var y = isBrowser ? 0.145 : 0.068;
+            AddRelativeCandidate(candidates, window, 0.47, y, 0.28, 0.052, "抖音顶部输入区");
+            AddRelativeCandidate(candidates, window, 0.40, y, 0.26, 0.052, "抖音左侧顶部输入区");
+            AddRelativeCandidate(candidates, window, 0.54, y, 0.26, 0.052, "抖音宽版顶部输入区");
+        }
+
+        // For other apps, infer an input area from OCR without ever clicking an
+        // exact Search button label. Exact labels are treated as submit buttons,
+        // so the focus candidate is placed immediately to their left. Longer
+        // placeholder text is expanded to a field and clicked away from the text.
+        foreach (var anchor in snapshot.Items
+                     .Where(item => CenterY(item.Bounds) <= window.Top + (int)(window.Height * 0.36))
+                     .Where(item => LooksLikeSearchText(item.Text))
+                     .OrderBy(item => item.Bounds.Top)
+                     .ThenBy(item => item.Bounds.Left))
+        {
+            var normalized = Normalize(anchor.Text).Trim(':', '：', '…', '.', '。');
+            var fieldWidth = Math.Clamp((int)Math.Round(window.Width * 0.20), 170, 360);
+            var fieldHeight = Math.Clamp(Math.Max(anchor.Bounds.Height + 16, 34), 34, 58);
+            Rectangle inferred;
+            if (LooksLikeSearchButton(anchor.Text))
+            {
+                var right = anchor.Bounds.Left - Math.Clamp(anchor.Bounds.Height / 3, 8, 18);
+                inferred = Rectangle.FromLTRB(
+                    right - fieldWidth,
+                    CenterY(anchor.Bounds) - fieldHeight / 2,
+                    right,
+                    CenterY(anchor.Bounds) + fieldHeight / 2);
+            }
+            else
+            {
+                var left = anchor.Bounds.Left - Math.Clamp(fieldWidth / 7, 22, 50);
+                inferred = Rectangle.FromLTRB(
+                    left,
+                    CenterY(anchor.Bounds) - fieldHeight / 2,
+                    left + fieldWidth,
+                    CenterY(anchor.Bounds) + fieldHeight / 2);
+            }
+
+            if (normalized.Length > 0)
+            {
+                AddCandidate(candidates, window, inferred, "屏幕推断搜索输入区", anchor.Bounds);
+            }
+        }
+
+        var exactSearchLabels = snapshot.Items
+            .Where(item => LooksLikeSearchButton(item.Text))
+            .Select(item => item.Bounds)
+            .ToArray();
+        return candidates
+            .Where(candidate => exactSearchLabels.All(label => !label.Contains(Center(candidate.Bounds))))
+            .ToArray();
+    }
 
     public static ScreenTextItem? FindSearchField(ScreenSnapshot snapshot)
     {
@@ -31,20 +148,24 @@ internal static class ScreenAutomationHeuristics
             return null;
         }
 
-        var fieldCenter = Center(originalFieldBounds);
-        var horizontalTolerance = Math.Max(260, originalFieldBounds.Width * 2);
-        var verticalTolerance = Math.Max(70, originalFieldBounds.Height * 2);
+        var horizontalPadding = Math.Clamp(originalFieldBounds.Width / 12, 12, 34);
+        var verticalPadding = Math.Clamp(originalFieldBounds.Height / 2, 10, 26);
+        var verificationBounds = Rectangle.Inflate(
+            originalFieldBounds,
+            horizontalPadding,
+            verticalPadding);
         return snapshot.Items
             .Where(item => TextMatches(item.Text, normalizedQuery, minimumPartialLength: 4))
             .Select(item => new
             {
                 Item = item,
-                Dx = Math.Abs(CenterX(item.Bounds) - fieldCenter.X),
-                Dy = Math.Abs(CenterY(item.Bounds) - fieldCenter.Y)
+                Intersection = Rectangle.Intersect(verificationBounds, item.Bounds),
+                Distance = DistanceSquared(Center(originalFieldBounds), Center(item.Bounds))
             })
-            .Where(candidate => candidate.Dx <= horizontalTolerance && candidate.Dy <= verticalTolerance)
-            .OrderBy(candidate => candidate.Dy)
-            .ThenBy(candidate => candidate.Dx)
+            .Where(candidate => verificationBounds.Contains(Center(candidate.Item.Bounds))
+                                || (candidate.Intersection.Width > 0 && candidate.Intersection.Height > 0))
+            .OrderByDescending(candidate => candidate.Intersection.Width * candidate.Intersection.Height)
+            .ThenBy(candidate => candidate.Distance)
             .Select(candidate => candidate.Item)
             .FirstOrDefault();
     }
@@ -285,11 +406,33 @@ internal static class ScreenAutomationHeuristics
         };
         var submit = typed is null ? null : FindSearchSubmitButton(results, typed, field.Bounds);
         var contact = FindRecipientResult(results, "小明", field.Bounds);
+        var qqWithoutPlaceholder = initial with
+        {
+            Id = "qq-no-placeholder",
+            Items = [new ScreenTextItem(1, "好友", new Rectangle(45, 150, 80, 30))]
+        };
+        var qqCandidates = GetSearchFocusCandidates(qqWithoutPlaceholder, "QQ", ["qq"]);
+        var resultOutsideField = FindTypedSearchText(
+            resultOnly,
+            "小明",
+            new Rectangle(45, 35, 230, 48));
+        var douyinButton = new Rectangle(790, 42, 70, 32);
+        var douyin = initial with
+        {
+            Id = "douyin-search",
+            ProcessName = "Douyin",
+            Items = [new ScreenTextItem(1, "搜索", douyinButton)]
+        };
+        var douyinCandidates = GetSearchFocusCandidates(douyin, "抖音", ["Douyin"]);
         if (typed?.Index != 1
             || typedFromShortcut?.Index != 1
             || FindTypedSearchTextInTopRegion(resultOnly, "小明") is not null
             || submit?.Index != 3
-            || contact?.Index != 2)
+            || contact?.Index != 2
+            || qqCandidates.Count < 3
+            || resultOutsideField is not null
+            || douyinCandidates.Count < 3
+            || douyinCandidates.Any(candidate => douyinButton.Contains(Center(candidate.Bounds))))
         {
             return false;
         }
@@ -346,6 +489,69 @@ internal static class ScreenAutomationHeuristics
 
     private static string Normalize(string text) =>
         string.Concat(text.Where(character => !char.IsWhiteSpace(character))).Trim();
+
+    private static void AddRelativeCandidate(
+        ICollection<SearchFocusCandidate> candidates,
+        Rectangle window,
+        double relativeCenterX,
+        double relativeCenterY,
+        double relativeWidth,
+        double relativeHeight,
+        string source)
+    {
+        var centerX = window.Left + (int)Math.Round(window.Width * relativeCenterX);
+        var centerY = window.Top + (int)Math.Round(window.Height * relativeCenterY);
+        var width = Math.Clamp((int)Math.Round(window.Width * relativeWidth), 170, 380);
+        var height = Math.Clamp((int)Math.Round(window.Height * relativeHeight), 34, 56);
+        AddCandidate(
+            candidates,
+            window,
+            Rectangle.FromLTRB(
+                centerX - width / 2,
+                centerY - height / 2,
+                centerX + width / 2,
+                centerY + height / 2),
+            source);
+    }
+
+    private static void AddCandidate(
+        ICollection<SearchFocusCandidate> candidates,
+        Rectangle window,
+        Rectangle proposed,
+        string source,
+        Rectangle? forbiddenClickBounds = null)
+    {
+        var allowed = Rectangle.FromLTRB(
+            window.Left + 10,
+            window.Top + 10,
+            window.Right - 10,
+            window.Top + (int)Math.Round(window.Height * 0.38));
+        var clipped = Rectangle.Intersect(proposed, allowed);
+        if (clipped.Width < 100 || clipped.Height < 28)
+        {
+            return;
+        }
+
+        var point = Center(clipped);
+        if (forbiddenClickBounds is not null && forbiddenClickBounds.Value.Contains(point))
+        {
+            return;
+        }
+        if (candidates.Any(candidate =>
+                DistanceSquared(Center(candidate.Bounds), point) <= 18L * 18L))
+        {
+            return;
+        }
+        candidates.Add(new SearchFocusCandidate(clipped, source));
+    }
+
+    private static bool IsBrowserProcess(string processName) =>
+        processName.Equals("chrome", StringComparison.OrdinalIgnoreCase)
+        || processName.Equals("msedge", StringComparison.OrdinalIgnoreCase)
+        || processName.Equals("firefox", StringComparison.OrdinalIgnoreCase)
+        || processName.Equals("brave", StringComparison.OrdinalIgnoreCase)
+        || processName.Equals("opera", StringComparison.OrdinalIgnoreCase)
+        || processName.Equals("vivaldi", StringComparison.OrdinalIgnoreCase);
 
     private static int CenterX(Rectangle bounds) => bounds.Left + bounds.Width / 2;
 
