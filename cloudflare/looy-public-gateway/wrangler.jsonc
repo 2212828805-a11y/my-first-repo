@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "looy-public-gateway",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-29",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "ORIGIN_URL": "https://looy-admin-console.honest-crown-2664.chatgpt.site"
+  }
+}
