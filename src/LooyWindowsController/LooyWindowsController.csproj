@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -28,11 +29,6 @@
   <PropertyGroup Condition="'$(ProtectRelease)' == 'true'">
     <DefineConstants>$(DefineConstants);RELEASE_PROTECTED</DefineConstants>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Reference Include="UIAutomationClient" />
-    <Reference Include="UIAutomationTypes" />
-  </ItemGroup>
 
   <Target
     Name="ProtectReleaseAssembly"
