@@ -1,5 +1,5 @@
 #define MyAppName "路遥智控"
-#define MyAppVersion "0.7.6"
+#define MyAppVersion "0.7.7"
 #define MyAppPublisher "LOOY"
 #define MyAppExeName "LooyWindowsController.exe"
 

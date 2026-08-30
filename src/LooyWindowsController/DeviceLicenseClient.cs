@@ -262,7 +262,7 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.6",
+            "0.7.7",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
@@ -279,6 +279,18 @@ internal sealed class DeviceLicenseClient : IDisposable
                && AdminUrl == BackupServiceBaseUrl + "/admin"
                && ServiceEndpoints.Length == 2
                && ServiceEndpoints.Select(endpoint => endpoint.GetLeftPart(UriPartial.Authority)).Distinct().Count() == 2
+               && ShouldTryNextEndpoint(new LicenseHttpResult(
+                   HttpStatusCode.Forbidden,
+                   null,
+                   null,
+                   "授权网关请求失败（HTTP 403）。",
+                   StructuredServiceResponse: false))
+               && !ShouldTryNextEndpoint(new LicenseHttpResult(
+                   HttpStatusCode.Forbidden,
+                   null,
+                   "invalid_code",
+                   "激活码无效",
+                   StructuredServiceResponse: true))
                && deviceId.Length == 64
                && deviceId.All(character => char.IsAsciiHexDigit(character) && !char.IsUpper(character))
                && nonce.Length >= 16
@@ -395,7 +407,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         CancellationToken cancellationToken)
     {
         var failures = new List<string>();
-        LicenseHttpResult? lastServerFailure = null;
+        LicenseHttpResult? lastRetryableFailure = null;
         foreach (var endpoint in OrderedServiceEndpoints())
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -417,7 +429,7 @@ internal sealed class DeviceLicenseClient : IDisposable
                     HttpCompletionOption.ResponseHeadersRead,
                     attempt.Token);
                 var result = await ReadResultAsync(response, attempt.Token);
-                if ((int)result.StatusCode < 500)
+                if (!ShouldTryNextEndpoint(result))
                 {
                     if (result.Response is not null)
                     {
@@ -426,7 +438,7 @@ internal sealed class DeviceLicenseClient : IDisposable
                     return result;
                 }
 
-                lastServerFailure = result;
+                lastRetryableFailure = result;
                 failures.Add($"{endpoint.Host}: HTTP {(int)result.StatusCode}");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -443,9 +455,14 @@ internal sealed class DeviceLicenseClient : IDisposable
             }
         }
 
-        if (lastServerFailure is not null)
+        if (lastRetryableFailure is not null)
         {
-            return lastServerFailure;
+            return new LicenseHttpResult(
+                HttpStatusCode.ServiceUnavailable,
+                null,
+                "gateway_unavailable",
+                $"授权主线路和备用线路均未通过（{string.Join("；", failures)}）。这不是设备封禁或激活码无效。",
+                StructuredServiceResponse: true);
         }
 
         throw new HttpRequestException(
@@ -459,7 +476,12 @@ internal sealed class DeviceLicenseClient : IDisposable
         var content = await response.Content.ReadAsStringAsync(cancellationToken);
         if (content.Length > 64 * 1024)
         {
-            return new LicenseHttpResult(response.StatusCode, null, "invalid_response", "授权服务返回内容异常。");
+            return new LicenseHttpResult(
+                response.StatusCode,
+                null,
+                "invalid_response",
+                "授权服务返回内容异常。",
+                StructuredServiceResponse: false);
         }
 
         LicenseApiResponse? payload = null;
@@ -472,16 +494,32 @@ internal sealed class DeviceLicenseClient : IDisposable
             // A structured error is returned below.
         }
 
+        var structuredServiceResponse = payload is not null
+                                        && (payload.Ok
+                                            || !string.IsNullOrWhiteSpace(payload.Error)
+                                            || !string.IsNullOrWhiteSpace(payload.Message));
         if (!response.IsSuccessStatusCode || payload?.Ok != true)
         {
             return new LicenseHttpResult(
                 response.StatusCode,
                 null,
                 payload?.Error,
-                payload?.Message ?? $"授权网关请求失败（HTTP {(int)response.StatusCode}）。");
+                payload?.Message ?? $"授权网关请求失败（HTTP {(int)response.StatusCode}）。",
+                structuredServiceResponse);
         }
-        return new LicenseHttpResult(response.StatusCode, payload, null, null);
+        return new LicenseHttpResult(
+            response.StatusCode,
+            payload,
+            null,
+            null,
+            StructuredServiceResponse: true);
     }
+
+    private static bool ShouldTryNextEndpoint(LicenseHttpResult result) =>
+        (int)result.StatusCode >= 500
+        || result.StatusCode is HttpStatusCode.RequestTimeout
+            or HttpStatusCode.TooManyRequests
+        || !result.StructuredServiceResponse;
 
     private IEnumerable<Uri> OrderedServiceEndpoints()
     {
@@ -766,7 +804,8 @@ internal sealed class DeviceLicenseClient : IDisposable
         HttpStatusCode StatusCode,
         LicenseApiResponse? Response,
         string? ErrorCode,
-        string? Message);
+        string? Message,
+        bool StructuredServiceResponse);
 }
 
 internal sealed record DeviceLicenseCheckResult(

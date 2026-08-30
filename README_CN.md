@@ -93,7 +93,7 @@ QQ/微信消息必须先调用 windows.prepare_chat_message；该工具只填入
 
 ## 开发者：在 Windows 一键构建
 
-普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.7.6.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
+普通用户优先下载并运行 GitHub Actions 生成的 `LooyWindowsController-Setup-0.7.7.exe`，不需要执行下面的源码构建脚本。安装程序默认安装到当前用户目录，不要求管理员权限。
 
 项目需要 Windows 10/11。建议先双击根目录中的英文诊断启动器：
 
@@ -131,9 +131,9 @@ dotnet publish src\LooyWindowsController\LooyWindowsController.csproj `
 仓库内已提供 `.github/workflows/build-windows.yml`。
 
 - 手动进入 GitHub Actions 运行 `Build Windows release`；或
-- 推送形如 `v0.7.6` 的标签。
+- 推送形如 `v0.7.7` 的标签。
 
-构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.7.6` artifact 即可。
+构建结束后，在该次 Actions 页面下载 `LooyWindowsController-Windows-v0.7.7` artifact 即可。
 
 ## 默认应用列表
 
@@ -168,6 +168,8 @@ Chrome、微信、QQ、抖音、网易云音乐和 VS Code 已提供示例别名
 0.7.5 删除设备绑定页的管理后台入口，并增加 Windows UI Automation 控件树定位。搜索时优先识别真实可编辑控件，排除浏览器地址栏、密码框和聊天输入区，再由应用布局与本机 OCR 兜底；内容输入并核对无误后才点击独立搜索按钮或按回车。控制器窗口暂时位于前台时，可安全恢复最近一次已确认的目标应用，避免连续识别被自身窗口打断。
 
 0.7.6 修复部分电脑无法访问单一 `workers.dev` 线路时激活与在线校验持续超时的问题。客户端会为每次激活和心跳生成新的签名请求，自动在公网网关与授权服务备用入口之间切换，并记住本机最近一次可用线路；服务器明确返回封禁、停用或到期时仍会立即停止应用，网络故障不会再被误报成激活码无效。
+
+0.7.7 修复公共网关返回非授权业务产生的 HTTP 403 时客户端提前停止、未继续尝试备用线路的问题。只有授权服务返回带明确错误码的业务拒绝才会立即停止；Cloudflare 或本地网络拦截产生的无结构 403、异常页面和其他网关响应会自动切换线路。
 
 0.6.2 的正式构建还会执行基础代码混淆、字符串隐藏和 IL 优化，不打包源码、PDB 或混淆映射。它能明显增加直接复制和反编译修改的难度，但任何交付到用户电脑的软件都无法保证绝对不可逆向；真正用于验证发布者与发现二次篡改仍需配置受信任的 Windows 代码签名证书。
 
