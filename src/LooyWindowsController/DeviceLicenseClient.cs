@@ -14,7 +14,7 @@ internal sealed class DeviceLicenseClient : IDisposable
     internal const string ServiceStatusUrl = ServiceBaseUrl + "/api/v1/info";
     internal const string PrivacyUrl = ServiceBaseUrl + "/privacy";
     internal const string AdminUrl = ServiceBaseUrl + "/admin";
-    internal const string ConsentVersion = "2026-08-29";
+    internal const string ConsentVersion = "2026-08-30-v2";
 
     private const int DefaultOfflineGraceSeconds = 72 * 60 * 60;
     private const int DefaultNextCheckSeconds = 15 * 60;
@@ -61,6 +61,11 @@ internal sealed class DeviceLicenseClient : IDisposable
     public string StatusText => StatusDisplayName(_state.Status);
     public DateTimeOffset? LastValidatedAt => _state.LastValidatedAt;
     public DateTimeOffset? LicenseExpiresAt => _state.LicenseExpiresAt;
+    public bool HasStoredLicense => !string.IsNullOrWhiteSpace(_state.ProtectedToken);
+    public bool ConsentIsCurrent => string.Equals(
+        _state.AcceptedConsentVersion,
+        ConsentVersion,
+        StringComparison.Ordinal);
 
     public async Task<DeviceLicenseCheckResult> ActivateAsync(
         string activationCode,
@@ -88,6 +93,8 @@ internal sealed class DeviceLicenseClient : IDisposable
         try
         {
             ThrowIfDisposed();
+            _state.AcceptedConsentVersion = ConsentVersion;
+            SaveState();
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var nonce = CreateNonce();
             var payload = BuildSignaturePayload(
@@ -118,6 +125,31 @@ internal sealed class DeviceLicenseClient : IDisposable
         }
     }
 
+    public async Task<DeviceLicenseCheckResult> AcceptUpdatedConsentAsync(
+        bool consentAccepted,
+        CancellationToken cancellationToken = default)
+    {
+        if (!consentAccepted)
+        {
+            return DeviceLicenseCheckResult.Denied(
+                "consent_required",
+                "请先阅读并同意最新用户协议与敏感权限说明。",
+                requiresActivation: true);
+        }
+        if (!HasStoredLicense)
+        {
+            return DeviceLicenseCheckResult.Denied(
+                "activation_required",
+                "这台电脑尚未绑定，请输入激活码。",
+                requiresActivation: true);
+        }
+
+        ThrowIfDisposed();
+        _state.AcceptedConsentVersion = ConsentVersion;
+        SaveState();
+        return await CheckAsync(allowOfflineGrace: false, cancellationToken);
+    }
+
     public async Task<DeviceLicenseCheckResult> CheckAsync(
         bool allowOfflineGrace,
         CancellationToken cancellationToken = default)
@@ -131,6 +163,13 @@ internal sealed class DeviceLicenseClient : IDisposable
                 return DeviceLicenseCheckResult.Denied(
                     "activation_required",
                     "这台电脑尚未绑定，请输入激活码。",
+                    requiresActivation: true);
+            }
+            if (!ConsentIsCurrent)
+            {
+                return DeviceLicenseCheckResult.Denied(
+                    "consent_required",
+                    "用户协议与敏感权限说明已更新，请重新阅读并明确同意。",
                     requiresActivation: true);
             }
 
@@ -201,13 +240,14 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.2",
+            "0.7.3",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
             HashAlgorithmName.SHA256,
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-        return ServiceBaseUrl == "https://looy-public-gateway.2212828805.workers.dev"
+        return ConsentVersion == "2026-08-30-v2"
+               && ServiceBaseUrl == "https://looy-public-gateway.2212828805.workers.dev"
                && ServiceStatusUrl == ServiceBaseUrl + "/api/v1/info"
                && AdminUrl == ServiceBaseUrl + "/admin"
                && deviceId.Length == 64
@@ -238,9 +278,13 @@ internal sealed class DeviceLicenseClient : IDisposable
     {
         if (result.Response is null)
         {
-            var requiresActivation = requiresActivationOnAuthFailure
-                                     && result.StatusCode is HttpStatusCode.Unauthorized
-                                         or HttpStatusCode.NotFound;
+            var requiresActivation = string.Equals(
+                                         result.ErrorCode,
+                                         "consent_required",
+                                         StringComparison.Ordinal)
+                                     || (requiresActivationOnAuthFailure
+                                         && result.StatusCode is HttpStatusCode.Unauthorized
+                                             or HttpStatusCode.NotFound);
             return DeviceLicenseCheckResult.Denied(
                 result.ErrorCode ?? "service_error",
                 result.Message ?? "授权服务暂时无法完成校验。",
@@ -529,6 +573,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         public DateTimeOffset? LastValidatedAt { get; set; }
         public int OfflineGraceSeconds { get; set; } = DefaultOfflineGraceSeconds;
         public int NextCheckSeconds { get; set; } = DefaultNextCheckSeconds;
+        public string? AcceptedConsentVersion { get; set; }
     }
 
     private sealed class LicenseApiResponse

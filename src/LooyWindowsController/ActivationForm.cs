@@ -10,10 +10,12 @@ internal sealed class ActivationForm : Form
     private readonly Panel _activationPanel = new();
     private readonly TextBox _activationCodeBox = new();
     private readonly CheckBox _consentBox = new();
+    private readonly CheckBox _sensitivePermissionBox = new();
     private readonly Button _activateButton = new() { Text = "绑定这台电脑" };
     private readonly Button _retryButton = new() { Text = "重新校验" };
     private readonly Button _exitButton = new() { Text = "退出应用" };
     private bool _busy;
+    private bool _agreementViewed;
 
     public ActivationForm(DeviceLicenseClient licenseClient)
     {
@@ -26,9 +28,9 @@ internal sealed class ActivationForm : Form
     {
         Text = "路遥智伴 · 设备绑定";
         Width = 650;
-        Height = 600;
-        MinimumSize = new Size(650, 600);
-        MaximumSize = new Size(650, 600);
+        Height = 720;
+        MinimumSize = new Size(650, 720);
+        MaximumSize = new Size(650, 720);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -139,20 +141,21 @@ internal sealed class ActivationForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             Padding = new Padding(24, 14, 24, 4),
             BackColor = AppTheme.Surface
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         layout.Controls.Add(new Label
         {
-            Text = "激活码",
+            Text = "激活码（首次绑定必填；已绑定设备重新同意无需填写）",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             Font = new Font(Font, FontStyle.Bold),
@@ -168,21 +171,27 @@ internal sealed class ActivationForm : Form
         layout.Controls.Add(_activationCodeBox, 0, 1);
 
         _consentBox.Dock = DockStyle.Fill;
-        _consentBox.Text = "我已阅读并同意隐私与数据说明，允许上传设备随机标识、应用版本、最后在线时间、公网 IP 与城市级近似位置。";
+        _consentBox.Text = $"我已阅读并同意《用户协议与隐私说明》（{DeviceLicenseClient.ConsentVersion}）。";
         _consentBox.ForeColor = AppTheme.Ink;
         _consentBox.FlatStyle = FlatStyle.Flat;
         layout.Controls.Add(_consentBox, 0, 2);
 
+        _sensitivePermissionBox.Dock = DockStyle.Fill;
+        _sensitivePermissionBox.Text = "我特别同意：应用可按控制指令识别前台画面，并模拟键盘、鼠标和切换应用；识别出的可见文字与执行结果可能返回给我配置的 MCP 控制连接。聊天发送仍需后续单独“确认发送”。";
+        _sensitivePermissionBox.ForeColor = AppTheme.Ink;
+        _sensitivePermissionBox.FlatStyle = FlatStyle.Flat;
+        layout.Controls.Add(_sensitivePermissionBox, 0, 3);
+
         var privacyLink = new LinkLabel
         {
-            Text = "查看隐私与数据说明",
+            Text = "打开完整协议（必读，应用内可离线查看）",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             LinkColor = AppTheme.Accent,
             ActiveLinkColor = AppTheme.Gold
         };
-        privacyLink.LinkClicked += (_, _) => OpenUrl(DeviceLicenseClient.PrivacyUrl);
-        layout.Controls.Add(privacyLink, 0, 3);
+        privacyLink.LinkClicked += (_, _) => ShowAgreement();
+        layout.Controls.Add(privacyLink, 0, 4);
 
         var adminLink = new LinkLabel
         {
@@ -193,7 +202,7 @@ internal sealed class ActivationForm : Form
             ActiveLinkColor = AppTheme.Gold
         };
         adminLink.LinkClicked += (_, _) => OpenUrl(DeviceLicenseClient.AdminUrl);
-        layout.Controls.Add(adminLink, 0, 4);
+        layout.Controls.Add(adminLink, 0, 5);
         _activationPanel.Controls.Add(layout);
     }
 
@@ -253,19 +262,28 @@ internal sealed class ActivationForm : Form
         {
             return;
         }
-        if (!_consentBox.Checked)
+        if (!_agreementViewed || !_consentBox.Checked)
         {
-            ShowFailure("请先阅读并勾选同意隐私与数据说明。", showActivation: true);
+            ShowFailure("请先打开完整协议，阅读后点击“我已阅读并同意”，并勾选协议同意。", showActivation: true);
+            return;
+        }
+        if (!_sensitivePermissionBox.Checked)
+        {
+            ShowFailure("请单独勾选敏感权限特别授权；不同意时不会启用屏幕识别与键盘鼠标控制。", showActivation: true);
             return;
         }
 
         SetBusy(true, "正在绑定这台电脑……");
         try
         {
-            var result = await _licenseClient.ActivateAsync(
-                _activationCodeBox.Text,
-                _consentBox.Checked,
-                _lifetime.Token);
+            var result = _licenseClient.HasStoredLicense && !_licenseClient.ConsentIsCurrent
+                ? await _licenseClient.AcceptUpdatedConsentAsync(
+                    _consentBox.Checked,
+                    _lifetime.Token)
+                : await _licenseClient.ActivateAsync(
+                    _activationCodeBox.Text,
+                    _consentBox.Checked,
+                    _lifetime.Token);
             if (result.Allowed)
             {
                 DialogResult = DialogResult.OK;
@@ -326,6 +344,7 @@ internal sealed class ActivationForm : Form
         _busy = busy;
         _activationCodeBox.Enabled = !busy;
         _consentBox.Enabled = !busy;
+        _sensitivePermissionBox.Enabled = !busy;
         _activateButton.Enabled = !busy;
         _retryButton.Enabled = !busy;
         _exitButton.Enabled = !busy;
@@ -333,6 +352,16 @@ internal sealed class ActivationForm : Form
         {
             _statusLabel.Text = message;
             _statusLabel.ForeColor = AppTheme.Warning;
+        }
+    }
+
+    private void ShowAgreement()
+    {
+        using var agreement = new UserAgreementForm(DeviceLicenseClient.PrivacyUrl);
+        if (agreement.ShowDialog(this) == DialogResult.OK)
+        {
+            _agreementViewed = true;
+            _consentBox.Checked = true;
         }
     }
 
@@ -359,5 +388,172 @@ internal sealed class ActivationForm : Form
             _lifetime.Dispose();
         }
         base.Dispose(disposing);
+    }
+}
+
+
+internal sealed class UserAgreementForm : Form
+{
+    public UserAgreementForm(string onlineUrl)
+    {
+        Text = "路遥智伴 · 用户协议与敏感权限说明";
+        Width = 820;
+        Height = 720;
+        MinimumSize = new Size(680, 560);
+        StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Microsoft YaHei UI", 9F);
+        BackColor = AppTheme.Canvas;
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 4,
+            Padding = new Padding(24),
+            BackColor = AppTheme.Surface
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+
+        root.Controls.Add(new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "用户协议、隐私与敏感权限说明",
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Microsoft YaHei UI", 17F, FontStyle.Bold),
+            ForeColor = AppTheme.Ink
+        }, 0, 0);
+
+        var agreementText = new RichTextBox
+        {
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            DetectUrls = false,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = Color.White,
+            ForeColor = AppTheme.Ink,
+            Font = new Font("Microsoft YaHei UI", 10F),
+            Text = BuildAgreementText(),
+            ScrollBars = RichTextBoxScrollBars.Vertical
+        };
+        root.Controls.Add(agreementText, 0, 1);
+
+        root.Controls.Add(new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "特别提醒：同意协议不等于自动开启所有控制能力。激活页还会要求你单独勾选敏感权限；键盘和鼠标首次使用时仍会再次弹窗，可选择仅本次、始终允许或拒绝。",
+            ForeColor = AppTheme.Warning,
+            Padding = new Padding(0, 12, 0, 6)
+        }, 0, 2);
+
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = AppTheme.Surface
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
+
+        var onlineLink = new LinkLabel
+        {
+            Text = "在浏览器查看在线版本",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            LinkColor = AppTheme.Accent,
+            ActiveLinkColor = AppTheme.Gold
+        };
+        onlineLink.LinkClicked += (_, _) => OpenOnlineUrl(onlineUrl);
+        footer.Controls.Add(onlineLink, 0, 0);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
+        };
+        var agreeButton = new Button
+        {
+            Text = "我已阅读并同意",
+            Width = 150,
+            Height = 36,
+            DialogResult = DialogResult.OK
+        };
+        var declineButton = new Button
+        {
+            Text = "不同意并返回",
+            Width = 126,
+            Height = 36,
+            DialogResult = DialogResult.Cancel
+        };
+        AppTheme.StyleButton(agreeButton, ButtonKind.Primary);
+        AppTheme.StyleButton(declineButton);
+        buttons.Controls.Add(agreeButton);
+        buttons.Controls.Add(declineButton);
+        footer.Controls.Add(buttons, 1, 0);
+        root.Controls.Add(footer, 0, 3);
+
+        Controls.Add(root);
+        AcceptButton = agreeButton;
+        CancelButton = declineButton;
+    }
+
+    private static string BuildAgreementText() => $"""
+生效版本：{DeviceLicenseClient.ConsentVersion}
+产品：路遥智伴
+创作人：阿雾（抖音账号：54530767529）
+
+一、服务与适用范围
+路遥智伴是在用户自有或已获合法授权的 Windows 电脑上运行的辅助控制应用。应用可以连接由用户配置的 MCP 控制端，根据收到的指令打开白名单软件、识别前台画面文字，并执行已授权的键盘、鼠标、媒体或系统操作。禁止用于访问无权控制的设备、账号或数据。
+
+二、激活码与管理后台
+激活码绑定本机生成的独立公钥标识。管理员可单独启用、封禁设备，设置到期时间、永久授权或收费状态。管理后台控制的是本应用能否继续使用，不能仅凭激活码直接查看屏幕、读取文件或远程操作键盘鼠标。联网设备通常在启动或下一次心跳（最多约 15 分钟）应用状态；当前离线宽限最长为 72 小时。
+
+三、设备授权服务处理的数据
+激活与心跳会提交随机设备公钥标识、应用版本、授权状态、最后在线时间和同意版本。公网网关会提供公网 IP，以及由 IP 推断的国家、省级地区和城市级近似位置；这不是 GPS 精确定位。数据用于设备绑定、授权校验、封禁、收费控制、安全风控和故障支持。
+
+四、敏感权限特别说明
+• 屏幕捕获与 OCR：按指令截取前台窗口或屏幕并识别可见文字，画面可能含账号、聊天或其他敏感信息。
+• 键盘与鼠标自动化：向当前窗口输入文字和快捷键，并移动、点击或滚动鼠标；界面变化可能造成误操作。
+• 应用与系统操作：切换或启动白名单应用、控制媒体，并在单独确认后执行消息发送或高影响系统动作。
+• 联网控制连接：与用户配置的 MCP 地址连接，接收工具调用，并返回识别文字和执行结果。
+• 本机保存与管理员模式：保存加密设置、设备凭据和必要日志；需要控制高权限程序时，仅由用户主动选择管理员模式重启，UAC 仍须用户本人确认。
+
+五、屏幕文字与控制连接的数据流向
+屏幕 OCR 在本机完成，临时截图通常只在内存中处理；“保存截图”工具只有在该功能被启用并被调用时才写入本机数据目录。为了让当前 MCP 控制端判断下一步，识别出的可见文字、窗口信息和工具执行结果可能通过你配置的连接返回。设备授权后台本身不接收截图、OCR 文字、聊天内容、键盘逐键记录或鼠标轨迹。请只连接可信 MCP 地址，并避免在显示密码、验证码、支付信息或私密聊天时使用识别功能。
+
+六、重要操作保护
+QQ、微信消息先准备联系人和草稿，只有用户在后续单独明确发出“确认发送”指令后才发送；确认编号会过期且不能重复使用。关机、重启等高影响操作也需单独确认。自动识别可能因界面变化产生偏差，请在支付、删除、发布、发送或系统设置等操作前核对画面。
+
+七、保存与安全
+设备私钥由 Windows 当前用户加密并保存在本机。激活码在后台只保存不可逆摘要，完整激活码仅在创建时显示一次。后台保存设备授权记录及最近一次 IP、城市级近似位置，不建立连续定位轨迹。请妥善保护电脑账号、激活码和 MCP 地址。
+
+八、选择与撤回
+你必须分别确认协议同意和敏感权限特别授权才能完成激活。激活后仍可在应用中停用键盘、鼠标等权限、断开 MCP 地址、退出或卸载应用，也可联系管理员封禁设备。撤回会使相应功能不可用。
+
+九、收费与更新
+收费规则由管理员后台开关控制；接入实际支付平台前不会自动扣费。数据范围、敏感权限或控制方式发生重要变化时，应用会更新同意版本并要求重新阅读确认，不会静默代替用户同意。
+
+十、联系
+对授权、数据处理或权限撤回有疑问，请通过创作人公开渠道联系。
+""";
+
+    private static void OpenOnlineUrl(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"无法打开在线协议：{exception.Message}\n\n{url}",
+                "打开失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
     }
 }
