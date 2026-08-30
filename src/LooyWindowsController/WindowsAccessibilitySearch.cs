@@ -389,11 +389,6 @@ internal static class WindowsAccessibilitySearch
             {
                 return text.DocumentRange.GetText(500);
             }
-            if (element.TryGetCurrentPattern(LegacyIAccessiblePattern.Pattern, out var legacyPattern)
-                && legacyPattern is LegacyIAccessiblePattern legacy)
-            {
-                return legacy.Current.Value;
-            }
             return element.Current.Name;
         }
         catch

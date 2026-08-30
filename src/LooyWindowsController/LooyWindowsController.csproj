@@ -30,6 +30,11 @@
     <DefineConstants>$(DefineConstants);RELEASE_PROTECTED</DefineConstants>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
+
   <Target
     Name="ProtectReleaseAssembly"
     AfterTargets="CopyFilesToOutputDirectory"
