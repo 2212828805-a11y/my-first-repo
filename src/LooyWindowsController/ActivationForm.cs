@@ -141,7 +141,7 @@ internal sealed class ActivationForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 6,
             Padding = new Padding(24, 14, 24, 4),
             BackColor = AppTheme.Surface
         };
@@ -150,7 +150,6 @@ internal sealed class ActivationForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         layout.Controls.Add(new Label
@@ -193,16 +192,6 @@ internal sealed class ActivationForm : Form
         privacyLink.LinkClicked += (_, _) => ShowAgreement();
         layout.Controls.Add(privacyLink, 0, 4);
 
-        var adminLink = new LinkLabel
-        {
-            Text = "管理员可在后台生成激活码",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            LinkColor = AppTheme.Accent,
-            ActiveLinkColor = AppTheme.Gold
-        };
-        adminLink.LinkClicked += (_, _) => OpenUrl(DeviceLicenseClient.AdminUrl);
-        layout.Controls.Add(adminLink, 0, 5);
         _activationPanel.Controls.Add(layout);
     }
 

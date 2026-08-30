@@ -14,6 +14,7 @@ on:
       - fix/control-smoothness-v0.6.1
       - feature/startup-welcome-v0.6.2
       - feature/device-binding-v0.7.0
+      - feature/searchbox-uia-v0.7.5
     tags:
       - "v*"
 
@@ -140,13 +141,15 @@ jobs:
       - name: Verify screen search and chat selection rules
         shell: pwsh
         run: |
-          $process = Start-Process `
-            -FilePath "dist/win-x64/LooyWindowsController.exe" `
-            -ArgumentList "--self-test-screen-automation" `
-            -Wait `
-            -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "Screen automation self-test failed with exit code $($process.ExitCode)"
+          foreach ($argument in @("--self-test-screen-automation", "--self-test-accessibility-search")) {
+            $process = Start-Process `
+              -FilePath "dist/win-x64/LooyWindowsController.exe" `
+              -ArgumentList $argument `
+              -Wait `
+              -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "Screen automation self-test $argument failed with exit code $($process.ExitCode)"
+            }
           }
 
       - name: Verify safe system control catalog
@@ -180,8 +183,8 @@ jobs:
       - name: Upload application
         uses: actions/upload-artifact@v4
         with:
-          name: LooyWindowsController-Windows-v0.7.4
+          name: LooyWindowsController-Windows-v0.7.5
           path: |
             dist/LooyWindowsController-win-x64.zip
-            dist/installer/LooyWindowsController-Setup-0.7.4.exe
+            dist/installer/LooyWindowsController-Setup-0.7.5.exe
           if-no-files-found: error

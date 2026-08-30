@@ -240,7 +240,7 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.4",
+            "0.7.5",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,

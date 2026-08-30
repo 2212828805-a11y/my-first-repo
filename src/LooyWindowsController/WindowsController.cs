@@ -38,6 +38,8 @@ internal sealed class WindowsController
     private ScreenSnapshot? _screenSnapshot;
     private PendingChatSend? _pendingChatSend;
     private PendingPowerAction? _pendingPowerAction;
+    private IntPtr _lastExternalWindow;
+    private DateTimeOffset _lastExternalWindowAt = DateTimeOffset.MinValue;
 
     private sealed record PendingChatSend(
         string ConfirmationId,
@@ -110,6 +112,8 @@ internal sealed class WindowsController
         _pendingChatSend = null;
         _pendingPowerAction = null;
         _searchFieldHints.Clear();
+        _lastExternalWindow = IntPtr.Zero;
+        _lastExternalWindowAt = DateTimeOffset.MinValue;
     }
 
     public WindowsController(
@@ -394,7 +398,7 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("演示动作只支持 previous、next、end、start_current 或 start_beginning。");
         }
 
-        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        var targetHandle = ResolveForegroundExternalWindow();
         if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
         {
             return ToolExecutionResult.Fail("没有找到可控制的前台演示窗口。");
@@ -518,7 +522,7 @@ internal sealed class WindowsController
             return ToolExecutionResult.Fail("搜索关键词必须是 1 到 200 个字符的单行文字。");
         }
 
-        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        var targetHandle = ResolveForegroundExternalWindow();
         if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
         {
             return ToolExecutionResult.Fail("没有找到可操作的前台窗口。请先打开包含搜索框的应用或网页。");
@@ -633,6 +637,12 @@ internal sealed class WindowsController
         await Task.Delay(120, cancellationToken);
         var initial = await ScreenRecognitionService.InspectWindowAsync(handle, 80, cancellationToken);
         var candidates = new List<SearchFocusCandidate>();
+        candidates.AddRange(await WindowsAccessibilitySearch.FindCandidatesAsync(
+            handle,
+            initial.WindowBounds,
+            displayName,
+            processNames,
+            cancellationToken));
         var remembered = GetRememberedSearchFieldCandidate(displayName, initial);
         if (remembered is not null)
         {
@@ -705,7 +715,7 @@ internal sealed class WindowsController
             ? "网易云"
             : displayName;
         return (ToolExecutionResult.Fail(
-            $"{profile} 的搜索框没有显示“搜索”文字，程序已改用窗口候选输入区和应用快捷键逐一尝试，但没有在候选框内核对到“{query}”。所有试输入均已撤销，没有点击搜索按钮或按回车。请保持主窗口可见并恢复正常缩放后重试。"), null);
+            $"没有在 {profile} 的 Windows 控件树、已核对位置、屏幕候选区或应用快捷键中确认搜索框，因而没有提交“{query}”。所有试输入均已撤销；请保持主窗口可见并恢复正常缩放后重试。"), null);
     }
 
     private async Task<SearchFocusAttempt> TrySearchFocusCandidateAsync(
@@ -751,7 +761,7 @@ internal sealed class WindowsController
         }
 
         // A single down/up pair is intentional. Never hold, double-click, or
-        // click the OCR text label while trying to focus a search field.
+        // click an OCR text label while trying to focus a search field.
         var clickResult = SendMouseButton("left", 1);
         if (!clickResult.Success)
         {
@@ -897,6 +907,7 @@ internal sealed class WindowsController
         CancellationToken cancellationToken)
     {
         var timer = Stopwatch.StartNew();
+        var accessibilityChecked = false;
         while (timer.Elapsed < TimeSpan.FromSeconds(2.6))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -912,6 +923,18 @@ internal sealed class WindowsController
             if (item is null && allowTopRegion)
             {
                 item = ScreenAutomationHeuristics.FindTypedSearchTextInTopRegion(snapshot, query);
+            }
+            if (item is null && expectedBounds is not null && !accessibilityChecked)
+            {
+                accessibilityChecked = true;
+                var accessibleValue = await WindowsAccessibilitySearch.TryReadValueAsync(
+                    handle,
+                    expectedBounds.Value,
+                    cancellationToken);
+                if (WindowsAccessibilitySearch.ValueMatches(accessibleValue, query))
+                {
+                    item = new ScreenTextItem(0, query, expectedBounds.Value);
+                }
             }
             if (item is not null)
             {
@@ -1099,14 +1122,14 @@ internal sealed class WindowsController
         int maxItems,
         CancellationToken cancellationToken)
     {
-        var targetHandle = ScreenRecognitionService.GetForegroundTargetWindow();
+        var targetHandle = ResolveForegroundExternalWindow();
         if (targetHandle == IntPtr.Zero || !ScreenRecognitionService.IsWindowAvailable(targetHandle))
         {
             return ToolExecutionResult.Fail("没有找到可识别的前台窗口。请先把网易云音乐或浏览器切到前台。");
         }
         if (ScreenRecognitionService.IsOwnedByCurrentProcess(targetHandle))
         {
-            return ToolExecutionResult.Fail("当前前台是路遥智控窗口。请先把需要操作的网易云音乐或浏览器切到前台，再重新识别。");
+            return ToolExecutionResult.Fail("当前前台是路遥智控窗口，且没有可安全恢复的最近目标。请先把需要操作的应用切到前台一次，再重新识别。");
         }
 
         if (!_permissionEnabled(PermissionKeys.ScreenRecognition)
@@ -1368,11 +1391,52 @@ internal sealed class WindowsController
     {
         if (ScreenRecognitionService.IsExactForegroundWindow(handle))
         {
+            RememberExternalWindow(handle);
             return true;
         }
 
         TryBringWindowToFront(handle, processNames);
-        return ScreenRecognitionService.IsExactForegroundWindow(handle);
+        var restored = ScreenRecognitionService.IsExactForegroundWindow(handle);
+        if (restored)
+        {
+            RememberExternalWindow(handle);
+        }
+        return restored;
+    }
+
+    private IntPtr ResolveForegroundExternalWindow()
+    {
+        var foreground = ScreenRecognitionService.GetForegroundTargetWindow();
+        if (foreground != IntPtr.Zero
+            && ScreenRecognitionService.IsWindowAvailable(foreground)
+            && !ScreenRecognitionService.IsOwnedByCurrentProcess(foreground))
+        {
+            RememberExternalWindow(foreground);
+            return foreground;
+        }
+
+        if (_lastExternalWindow != IntPtr.Zero
+            && DateTimeOffset.Now - _lastExternalWindowAt <= TimeSpan.FromMinutes(10)
+            && ScreenRecognitionService.IsWindowAvailable(_lastExternalWindow)
+            && !ScreenRecognitionService.IsOwnedByCurrentProcess(_lastExternalWindow))
+        {
+            return _lastExternalWindow;
+        }
+
+        return foreground;
+    }
+
+    private void RememberExternalWindow(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero
+            || !ScreenRecognitionService.IsWindowAvailable(handle)
+            || ScreenRecognitionService.IsOwnedByCurrentProcess(handle))
+        {
+            return;
+        }
+
+        _lastExternalWindow = handle;
+        _lastExternalWindowAt = DateTimeOffset.Now;
     }
 
     private static ToolExecutionResult GetSystemStatus()
@@ -1924,6 +1988,7 @@ internal sealed class WindowsController
                 handle,
                 processNames);
         }
+        RememberExternalWindow(handle);
         _log($"已激活应用窗口：{app.DisplayName}");
         return new AppActivation(ToolExecutionResult.Ok($"已打开并激活 {app.DisplayName}。"), handle, processNames);
     }

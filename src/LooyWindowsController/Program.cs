@@ -50,6 +50,12 @@ internal static class Program
             return;
         }
         if (Environment.GetCommandLineArgs().Any(argument =>
+                argument.Equals("--self-test-accessibility-search", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = WindowsAccessibilitySearch.RunComponentSelfTest() ? 0 : 87;
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Any(argument =>
                 argument.Equals("--self-test-safe-system-tools", StringComparison.OrdinalIgnoreCase)))
         {
             Environment.ExitCode = WindowsSystemTools.RunComponentSelfTest() ? 0 : 87;

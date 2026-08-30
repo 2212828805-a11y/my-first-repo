@@ -10,7 +10,7 @@
     <ApplicationIcon>Assets\looy.ico</ApplicationIcon>
     <AssemblyName>LooyWindowsController</AssemblyName>
     <RootNamespace>Looy.WindowsController</RootNamespace>
-    <Version>0.7.4</Version>
+    <Version>0.7.5</Version>
     <Authors>LOOY</Authors>
     <Product>路遥智控</Product>
     <Description>在明确授权范围内安全控制 Windows 电脑</Description>
@@ -28,6 +28,11 @@
   <PropertyGroup Condition="'$(ProtectRelease)' == 'true'">
     <DefineConstants>$(DefineConstants);RELEASE_PROTECTED</DefineConstants>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
+  </ItemGroup>
 
   <Target
     Name="ProtectReleaseAssembly"
