@@ -23,7 +23,8 @@ internal static class WindowsAccessibilitySearch
 
     private static readonly string[] UnsafeTerms =
     [
-        "地址栏", "地址和搜索", "address and search", "address bar", "omnibox", "url", "网址",
+        "地址栏", "地址和搜索", "web 地址", "address and search", "address bar", "enter address",
+        "addresseditbox", "omnibox", "url", "网址",
         "密码", "password", "验证码", "activation", "激活码", "手机号", "phone", "账号", "account",
         "输入消息", "发送消息", "message", "评论", "comment", "聊天", "chat", "composer", "send"
     ];
