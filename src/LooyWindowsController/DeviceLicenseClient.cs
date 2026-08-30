@@ -12,13 +12,22 @@ namespace Looy.WindowsController;
 internal sealed class DeviceLicenseClient : IDisposable
 {
     internal const string ServiceBaseUrl = "https://looy-public-gateway.2212828805.workers.dev";
+    internal const string BackupServiceBaseUrl = "https://looy-admin-console.honest-crown-2664.chatgpt.site";
     internal const string ServiceStatusUrl = ServiceBaseUrl + "/api/v1/info";
-    internal const string PrivacyUrl = ServiceBaseUrl + "/privacy";
-    internal const string AdminUrl = ServiceBaseUrl + "/admin";
+    internal const string BackupServiceStatusUrl = BackupServiceBaseUrl + "/api/v1/info";
+    internal const string PrivacyUrl = BackupServiceBaseUrl + "/privacy";
+    internal const string AdminUrl = BackupServiceBaseUrl + "/admin";
     internal const string ConsentVersion = "2026-08-30-v3";
 
     private const int DefaultOfflineGraceSeconds = 0;
     private const int DefaultNextCheckSeconds = 5;
+    private const int EndpointTimeoutSeconds = 6;
+
+    private static readonly Uri[] ServiceEndpoints =
+    [
+        CreateServiceUri(ServiceBaseUrl),
+        CreateServiceUri(BackupServiceBaseUrl)
+    ];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -43,10 +52,16 @@ internal sealed class DeviceLicenseClient : IDisposable
         _statePath = Path.Combine(dataDirectory, "device-license.json");
         _state = LoadOrCreateState();
 
-        _httpClient = new HttpClient
+        var handler = new SocketsHttpHandler
         {
-            BaseAddress = new Uri(ServiceBaseUrl, UriKind.Absolute),
-            Timeout = TimeSpan.FromSeconds(10)
+            AutomaticDecompression = DecompressionMethods.All,
+            ConnectTimeout = TimeSpan.FromSeconds(4),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            UseProxy = true
+        };
+        _httpClient = new HttpClient(handler)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
         };
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"LooyWindowsController/{AppVersion}");
     }
@@ -96,28 +111,31 @@ internal sealed class DeviceLicenseClient : IDisposable
             ThrowIfDisposed();
             _state.AcceptedConsentVersion = ConsentVersion;
             SaveState();
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var nonce = CreateNonce();
-            var payload = BuildSignaturePayload(
-                "activate",
-                _state.DeviceId,
-                timestamp,
-                nonce,
-                AppVersion,
-                normalizedCode);
-            var request = new
+            object CreateRequest()
             {
-                activationCode = normalizedCode,
-                deviceId = _state.DeviceId,
-                publicKeySpki = _state.PublicKeySpki,
-                timestamp,
-                nonce,
-                appVersion = AppVersion,
-                consentVersion = ConsentVersion,
-                signature = SignPayload(payload)
-            };
+                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var nonce = CreateNonce();
+                var payload = BuildSignaturePayload(
+                    "activate",
+                    _state.DeviceId,
+                    timestamp,
+                    nonce,
+                    AppVersion,
+                    normalizedCode);
+                return new
+                {
+                    activationCode = normalizedCode,
+                    deviceId = _state.DeviceId,
+                    publicKeySpki = _state.PublicKeySpki,
+                    timestamp,
+                    nonce,
+                    appVersion = AppVersion,
+                    consentVersion = ConsentVersion,
+                    signature = SignPayload(payload)
+                };
+            }
 
-            var apiResult = await PostAsync("/api/v1/activate", request, cancellationToken);
+            var apiResult = await PostAsync("/api/v1/activate", CreateRequest, cancellationToken);
             return ApplyApiResult(apiResult, requiresActivationOnAuthFailure: true);
         }
         finally
@@ -187,40 +205,43 @@ internal sealed class DeviceLicenseClient : IDisposable
                     requiresActivation: true);
             }
 
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var nonce = CreateNonce();
-            var payload = BuildSignaturePayload(
-                "heartbeat",
-                _state.DeviceId,
-                timestamp,
-                nonce,
-                AppVersion);
-            var request = new
+            object CreateRequest()
             {
-                deviceId = _state.DeviceId,
-                token,
-                timestamp,
-                nonce,
-                appVersion = AppVersion,
-                consentVersion = ConsentVersion,
-                signature = SignPayload(payload)
-            };
+                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var nonce = CreateNonce();
+                var payload = BuildSignaturePayload(
+                    "heartbeat",
+                    _state.DeviceId,
+                    timestamp,
+                    nonce,
+                    AppVersion);
+                return new
+                {
+                    deviceId = _state.DeviceId,
+                    token,
+                    timestamp,
+                    nonce,
+                    appVersion = AppVersion,
+                    consentVersion = ConsentVersion,
+                    signature = SignPayload(payload)
+                };
+            }
 
             LicenseHttpResult apiResult;
             try
             {
-                apiResult = await PostAsync("/api/v1/heartbeat", request, cancellationToken);
+                apiResult = await PostAsync("/api/v1/heartbeat", CreateRequest, cancellationToken);
             }
             catch (Exception exception) when (
                 allowOfflineGrace &&
                 exception is HttpRequestException or TaskCanceledException)
             {
-                return EvaluateOfflineGrace();
+                return EvaluateOfflineGrace(networkUnavailable: true);
             }
 
             if ((int)apiResult.StatusCode >= 500 && allowOfflineGrace)
             {
-                return EvaluateOfflineGrace();
+                return EvaluateOfflineGrace(networkUnavailable: true);
             }
             return ApplyApiResult(apiResult, requiresActivationOnAuthFailure: true);
         }
@@ -241,7 +262,7 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.5",
+            "0.7.6",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
@@ -251,8 +272,13 @@ internal sealed class DeviceLicenseClient : IDisposable
                && DefaultOfflineGraceSeconds == 0
                && DefaultNextCheckSeconds == 5
                && ServiceBaseUrl == "https://looy-public-gateway.2212828805.workers.dev"
+               && BackupServiceBaseUrl == "https://looy-admin-console.honest-crown-2664.chatgpt.site"
                && ServiceStatusUrl == ServiceBaseUrl + "/api/v1/info"
-               && AdminUrl == ServiceBaseUrl + "/admin"
+               && BackupServiceStatusUrl == BackupServiceBaseUrl + "/api/v1/info"
+               && PrivacyUrl == BackupServiceBaseUrl + "/privacy"
+               && AdminUrl == BackupServiceBaseUrl + "/admin"
+               && ServiceEndpoints.Length == 2
+               && ServiceEndpoints.Select(endpoint => endpoint.GetLeftPart(UriPartial.Authority)).Distinct().Count() == 2
                && deviceId.Length == 64
                && deviceId.All(character => char.IsAsciiHexDigit(character) && !char.IsUpper(character))
                && nonce.Length >= 16
@@ -325,7 +351,7 @@ internal sealed class DeviceLicenseClient : IDisposable
             requiresActivation: false);
     }
 
-    private DeviceLicenseCheckResult EvaluateOfflineGrace()
+    private DeviceLicenseCheckResult EvaluateOfflineGrace(bool networkUnavailable = false)
     {
         var now = DateTimeOffset.UtcNow;
         var graceSeconds = _state.OfflineGraceSeconds > 0
@@ -335,7 +361,9 @@ internal sealed class DeviceLicenseClient : IDisposable
         {
             return DeviceLicenseCheckResult.Denied(
                 "online_check_required",
-                "严格在线授权校验失败；当前版本不提供离线宽限，请恢复网络后重新打开应用。",
+                networkUnavailable
+                    ? "主线路和备用线路均未完成授权校验；这不是服务器返回的封禁或激活码无效。请切换手机热点或关闭仅对浏览器生效的代理后，点击“重新校验”。严格在线授权期间应用不会在未校验状态下继续运行。"
+                    : "严格在线授权校验失败；当前版本不提供离线宽限，请恢复网络后重新打开应用。",
                 requiresActivation: false);
         }
 
@@ -363,14 +391,71 @@ internal sealed class DeviceLicenseClient : IDisposable
 
     private async Task<LicenseHttpResult> PostAsync(
         string path,
-        object requestBody,
+        Func<object> requestFactory,
         CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.PostAsJsonAsync(
-            path,
-            requestBody,
-            JsonOptions,
-            cancellationToken);
+        var failures = new List<string>();
+        LicenseHttpResult? lastServerFailure = null;
+        foreach (var endpoint in OrderedServiceEndpoints())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attempt.CancelAfter(TimeSpan.FromSeconds(EndpointTimeoutSeconds));
+            try
+            {
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Post,
+                    new Uri(endpoint, path.TrimStart('/')))
+                {
+                    Version = HttpVersion.Version11,
+                    VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+                    Content = JsonContent.Create(requestFactory(), options: JsonOptions)
+                };
+                request.Headers.Accept.ParseAdd("application/json");
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    attempt.Token);
+                var result = await ReadResultAsync(response, attempt.Token);
+                if ((int)result.StatusCode < 500)
+                {
+                    if (result.Response is not null)
+                    {
+                        RememberWorkingEndpoint(endpoint);
+                    }
+                    return result;
+                }
+
+                lastServerFailure = result;
+                failures.Add($"{endpoint.Host}: HTTP {(int)result.StatusCode}");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                failures.Add($"{endpoint.Host}: 连接超时");
+            }
+            catch (HttpRequestException exception)
+            {
+                failures.Add($"{endpoint.Host}: {CompactNetworkError(exception.Message)}");
+            }
+        }
+
+        if (lastServerFailure is not null)
+        {
+            return lastServerFailure;
+        }
+
+        throw new HttpRequestException(
+            $"授权主线路和备用线路均无法连接（{string.Join("；", failures)}）。");
+    }
+
+    private static async Task<LicenseHttpResult> ReadResultAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
         var content = await response.Content.ReadAsStringAsync(cancellationToken);
         if (content.Length > 64 * 1024)
         {
@@ -393,9 +478,59 @@ internal sealed class DeviceLicenseClient : IDisposable
                 response.StatusCode,
                 null,
                 payload?.Error,
-                payload?.Message ?? $"授权网关请求失败（HTTP {(int)response.StatusCode}）。请检查：{ServiceStatusUrl}");
+                payload?.Message ?? $"授权网关请求失败（HTTP {(int)response.StatusCode}）。");
         }
         return new LicenseHttpResult(response.StatusCode, payload, null, null);
+    }
+
+    private IEnumerable<Uri> OrderedServiceEndpoints()
+    {
+        var preferred = _state.PreferredServiceBaseUrl;
+        if (!string.IsNullOrWhiteSpace(preferred))
+        {
+            var preferredEndpoint = ServiceEndpoints.FirstOrDefault(endpoint =>
+                string.Equals(
+                    endpoint.GetLeftPart(UriPartial.Authority),
+                    preferred,
+                    StringComparison.OrdinalIgnoreCase));
+            if (preferredEndpoint is not null)
+            {
+                yield return preferredEndpoint;
+            }
+        }
+
+        foreach (var endpoint in ServiceEndpoints)
+        {
+            if (!string.Equals(
+                    endpoint.GetLeftPart(UriPartial.Authority),
+                    preferred,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                yield return endpoint;
+            }
+        }
+    }
+
+    private void RememberWorkingEndpoint(Uri endpoint)
+    {
+        var value = endpoint.GetLeftPart(UriPartial.Authority);
+        if (string.Equals(_state.PreferredServiceBaseUrl, value, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+        _state.PreferredServiceBaseUrl = value;
+        SaveState();
+    }
+
+    private static Uri CreateServiceUri(string value) =>
+        new(value.TrimEnd('/') + "/", UriKind.Absolute);
+
+    private static string CompactNetworkError(string value)
+    {
+        var compact = string.Join(" ", value.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return compact.Length <= 120 ? compact : compact[..120] + "…";
     }
 
     private DeviceLicenseState LoadOrCreateState()
@@ -585,6 +720,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         public int OfflineGraceSeconds { get; set; } = DefaultOfflineGraceSeconds;
         public int NextCheckSeconds { get; set; } = DefaultNextCheckSeconds;
         public string? AcceptedConsentVersion { get; set; }
+        public string? PreferredServiceBaseUrl { get; set; }
     }
 
     private sealed class LicenseApiResponse

@@ -288,13 +288,13 @@ internal sealed class ActivationForm : Form
         catch (HttpRequestException exception)
         {
             ShowFailure(
-                $"无法连接公网设备授权服务。\n请先用浏览器打开状态页：{DeviceLicenseClient.ServiceStatusUrl}\n网络错误：{exception.Message}",
+                $"授权请求没有到达服务器，这不是激活码无效。应用已自动尝试主线路和备用线路。\n请切换手机热点，或关闭仅对浏览器生效的代理后重试。\n网络错误：{exception.Message}",
                 showActivation: true);
         }
         catch (TaskCanceledException)
         {
             ShowFailure(
-                $"连接公网设备授权服务超时。\n请先用浏览器打开状态页：{DeviceLicenseClient.ServiceStatusUrl}",
+                "授权主线路和备用线路均连接超时，这不是激活码无效。请切换手机热点后重试。",
                 showActivation: true);
         }
         catch (Exception exception)
