@@ -10,9 +10,10 @@ namespace Looy.WindowsController;
 
 internal sealed class DeviceLicenseClient : IDisposable
 {
-    internal const string ServiceBaseUrl = "https://looy-admin-console.honest-crown-2664.chatgpt.site";
+    internal const string ServiceBaseUrl = "https://looy-public-gateway.2212828805.workers.dev";
+    internal const string ServiceStatusUrl = ServiceBaseUrl + "/api/v1/info";
     internal const string PrivacyUrl = ServiceBaseUrl + "/privacy";
-    internal const string AdminUrl = ServiceBaseUrl + "/";
+    internal const string AdminUrl = ServiceBaseUrl + "/admin";
     internal const string ConsentVersion = "2026-08-29";
 
     private const int DefaultOfflineGraceSeconds = 72 * 60 * 60;
@@ -44,7 +45,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         _httpClient = new HttpClient
         {
             BaseAddress = new Uri(ServiceBaseUrl, UriKind.Absolute),
-            Timeout = TimeSpan.FromSeconds(15)
+            Timeout = TimeSpan.FromSeconds(25)
         };
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"LooyWindowsController/{AppVersion}");
     }
@@ -200,13 +201,16 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.1",
+            "0.7.2",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
             HashAlgorithmName.SHA256,
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-        return deviceId.Length == 64
+        return ServiceBaseUrl == "https://looy-public-gateway.2212828805.workers.dev"
+               && ServiceStatusUrl == ServiceBaseUrl + "/api/v1/info"
+               && AdminUrl == ServiceBaseUrl + "/admin"
+               && deviceId.Length == 64
                && deviceId.All(character => char.IsAsciiHexDigit(character) && !char.IsUpper(character))
                && nonce.Length >= 16
                && key.VerifyData(
@@ -334,7 +338,7 @@ internal sealed class DeviceLicenseClient : IDisposable
                 response.StatusCode,
                 null,
                 payload?.Error,
-                payload?.Message ?? $"授权服务请求失败（{(int)response.StatusCode}）。");
+                payload?.Message ?? $"授权网关请求失败（HTTP {(int)response.StatusCode}）。请检查：{ServiceStatusUrl}");
         }
         return new LicenseHttpResult(response.StatusCode, payload, null, null);
     }

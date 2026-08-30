@@ -278,13 +278,17 @@ internal sealed class ActivationForm : Form
         {
             // The user closed the form.
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException exception)
         {
-            ShowFailure("无法连接设备授权服务，请检查网络后重试。", showActivation: true);
+            ShowFailure(
+                $"无法连接公网设备授权服务。\n请先用浏览器打开状态页：{DeviceLicenseClient.ServiceStatusUrl}\n网络错误：{exception.Message}",
+                showActivation: true);
         }
         catch (TaskCanceledException)
         {
-            ShowFailure("连接设备授权服务超时，请稍后重试。", showActivation: true);
+            ShowFailure(
+                $"连接公网设备授权服务超时。\n请先用浏览器打开状态页：{DeviceLicenseClient.ServiceStatusUrl}",
+                showActivation: true);
         }
         catch (Exception exception)
         {
