@@ -14,10 +14,10 @@ internal sealed class DeviceLicenseClient : IDisposable
     internal const string ServiceStatusUrl = ServiceBaseUrl + "/api/v1/info";
     internal const string PrivacyUrl = ServiceBaseUrl + "/privacy";
     internal const string AdminUrl = ServiceBaseUrl + "/admin";
-    internal const string ConsentVersion = "2026-08-30-v2";
+    internal const string ConsentVersion = "2026-08-30-v3";
 
-    private const int DefaultOfflineGraceSeconds = 72 * 60 * 60;
-    private const int DefaultNextCheckSeconds = 15 * 60;
+    private const int DefaultOfflineGraceSeconds = 0;
+    private const int DefaultNextCheckSeconds = 5;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -45,7 +45,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         _httpClient = new HttpClient
         {
             BaseAddress = new Uri(ServiceBaseUrl, UriKind.Absolute),
-            Timeout = TimeSpan.FromSeconds(25)
+            Timeout = TimeSpan.FromSeconds(10)
         };
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"LooyWindowsController/{AppVersion}");
     }
@@ -56,7 +56,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         : _state.DeviceId;
     public int NextCheckSeconds => Math.Clamp(
         _state.NextCheckSeconds <= 0 ? DefaultNextCheckSeconds : _state.NextCheckSeconds,
-        60,
+        5,
         60 * 60);
     public string StatusText => StatusDisplayName(_state.Status);
     public DateTimeOffset? LastValidatedAt => _state.LastValidatedAt;
@@ -240,13 +240,15 @@ internal sealed class DeviceLicenseClient : IDisposable
             deviceId,
             1_787_990_000_000,
             nonce,
-            "0.7.3",
+            "0.7.4",
             "LY-ABCDE-FGHIJ-KLMNO");
         var signature = key.SignData(
             payload,
             HashAlgorithmName.SHA256,
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-        return ConsentVersion == "2026-08-30-v2"
+        return ConsentVersion == "2026-08-30-v3"
+               && DefaultOfflineGraceSeconds == 0
+               && DefaultNextCheckSeconds == 5
                && ServiceBaseUrl == "https://looy-public-gateway.2212828805.workers.dev"
                && ServiceStatusUrl == ServiceBaseUrl + "/api/v1/info"
                && AdminUrl == ServiceBaseUrl + "/admin"
@@ -294,7 +296,7 @@ internal sealed class DeviceLicenseClient : IDisposable
         var response = result.Response;
         _state.Status = response.Status ?? "unknown";
         _state.BillingEnabled = response.BillingEnabled;
-        _state.OfflineGraceSeconds = response.OfflineGraceSeconds > 0
+        _state.OfflineGraceSeconds = response.OfflineGraceSeconds >= 0
             ? response.OfflineGraceSeconds
             : DefaultOfflineGraceSeconds;
         _state.NextCheckSeconds = response.NextCheckSeconds > 0
@@ -328,6 +330,14 @@ internal sealed class DeviceLicenseClient : IDisposable
         var graceSeconds = _state.OfflineGraceSeconds > 0
             ? _state.OfflineGraceSeconds
             : DefaultOfflineGraceSeconds;
+        if (graceSeconds <= 0)
+        {
+            return DeviceLicenseCheckResult.Denied(
+                "online_check_required",
+                "严格在线授权校验失败；当前版本不提供离线宽限，请恢复网络后重新打开应用。",
+                requiresActivation: false);
+        }
+
         var lastValidation = _state.LastValidatedAt;
         var previouslyAllowed = _state.Status is "active" or "grace";
         var tokenValid = !_state.TokenExpiresAt.HasValue || _state.TokenExpiresAt.Value > now;
