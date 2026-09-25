@@ -1,0 +1,174 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - agent/windows-installer-v011
+  push:
+    branches:
+      - main
+      - fix/chat-confirm-v0.5.2
+      - feature/source-controls-v0.6.0
+      - fix/control-smoothness-v0.6.1
+      - feature/startup-welcome-v0.6.2
+    tags:
+      - "v*"
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore pinned release protection tool
+        shell: pwsh
+        run: dotnet tool restore
+
+      - name: Publish win-x64
+        shell: pwsh
+        run: |
+          dotnet publish src/LooyWindowsController/LooyWindowsController.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output dist/win-x64 `
+            -p:PublishSingleFile=true `
+            -p:PublishReadyToRun=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:ProtectRelease=true
+          Copy-Item README_CN.md dist/win-x64/使用说明.md
+          $files = @(Get-ChildItem dist/win-x64 -File)
+          if ($files.Count -ne 2) {
+            throw "Portable release must contain exactly two files; found $($files.Count): $($files.Name -join ', ')"
+          }
+          Compress-Archive -Path dist/win-x64/* -DestinationPath dist/LooyWindowsController-win-x64.zip
+
+      - name: Verify welcome page and protected release path
+        shell: pwsh
+        run: |
+          foreach ($argument in @("--self-test-welcome-page", "--self-test-release-protection")) {
+            $process = Start-Process `
+              -FilePath "dist/win-x64/LooyWindowsController.exe" `
+              -ArgumentList $argument `
+              -Wait `
+              -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "Release self-test $argument failed with exit code $($process.ExitCode)"
+            }
+          }
+
+      - name: Verify Windows native input engine
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-native-input" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Windows INPUT layout self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify local screen recognition
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-screen-recognition" `
+            -Wait `
+            -PassThru
+          $report = Join-Path $env:TEMP "looy-ocr-self-test.txt"
+          if (Test-Path $report) {
+            Get-Content $report
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Windows OCR self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify NetEase app routing and result selection
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-netease-automation" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "NetEase routing self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify browser close routing
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-window-close-routing" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Browser close routing self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify screen search and chat selection rules
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-screen-automation" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Screen automation self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Verify safe system control catalog
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/win-x64/LooyWindowsController.exe" `
+            -ArgumentList "--self-test-safe-system-tools" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Safe system tools self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found: $iscc"
+          }
+          & $iscc installer/LooyWindowsController.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: LooyWindowsController-Windows-v0.6.2
+          path: |
+            dist/LooyWindowsController-win-x64.zip
+            dist/installer/LooyWindowsController-Setup-0.6.2.exe
+          if-no-files-found: error

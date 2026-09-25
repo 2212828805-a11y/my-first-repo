@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\looy.ico</ApplicationIcon>
+    <AssemblyName>LooyWindowsController</AssemblyName>
+    <RootNamespace>Looy.WindowsController</RootNamespace>
+    <Version>0.6.2</Version>
+    <Authors>LOOY</Authors>
+    <Product>路遥智控</Product>
+    <Description>在明确授权范围内安全控制 Windows 电脑</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(ProtectRelease)' == 'true'">
+    <DefineConstants>$(DefineConstants);RELEASE_PROTECTED</DefineConstants>
+  </PropertyGroup>
+
+  <Target
+    Name="ProtectReleaseAssembly"
+    AfterTargets="CopyFilesToOutputDirectory"
+    Condition="'$(Configuration)' == 'Release' and '$(ProtectRelease)' == 'true' and '$(DesignTimeBuild)' != 'true'"
+    Inputs="$(TargetPath)"
+    Outputs="$(IntermediateOutputPath)looy-release-protected.marker">
+    <Exec
+      WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+      Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\protect-release.ps1&quot; -AssemblyPath &quot;$(TargetPath)&quot; -MarkerPath &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)looy-release-protected.marker&quot;" />
+  </Target>
+</Project>
